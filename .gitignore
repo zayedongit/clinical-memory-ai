@@ -1,0 +1,24 @@
+# Secrets & environment files — NEVER commit these
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Dependencies
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# Build output
+.next/
+dist/
+build/
+
+# OS & editor noise
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
