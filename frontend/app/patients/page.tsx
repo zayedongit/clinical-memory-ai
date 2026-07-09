@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabaseClient";
 import { apiGet, apiPost } from "../../lib/api";
@@ -108,7 +109,10 @@ export default function PatientsPage() {
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Patients</h1>
           <p className="text-sm text-slate-500">{me?.clinic_name}</p>
         </div>
-        <button onClick={signOut} className="text-sm text-slate-500 transition hover:text-slate-900">Sign out</button>
+        <div className="flex items-center gap-4">
+          <Link href="/lookup" className="text-sm font-medium text-blue-600 transition hover:text-blue-700">Clinical lookup</Link>
+          <button onClick={signOut} className="text-sm text-slate-500 transition hover:text-slate-900">Sign out</button>
+        </div>
       </header>
 
       <form onSubmit={addPatient} className="glass mb-5 flex flex-wrap items-center gap-2 rounded-2xl p-3">
