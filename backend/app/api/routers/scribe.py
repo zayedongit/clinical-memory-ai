@@ -54,6 +54,7 @@ async def transcribe(file: UploadFile = File(...), user: CurrentUser = Depends(g
 class SoapRequest(BaseModel):
     transcript: str
     patient_context: str | None = None
+    mode: str = "interim"  # "interim" (SOAP + follow-ups) | "final" (complete note, no questions)
 
 
 _SYSTEM = (
@@ -69,13 +70,28 @@ _SYSTEM = (
 )
 
 
-def _prompt(transcript: str, context: str) -> str:
+def _prompt(transcript: str, context: str, mode: str) -> str:
+    if mode == "final":
+        mode_note = (
+            "This is the FINAL, COMPLETE note for the ENTIRE consultation (the transcript spans "
+            "the whole visit, possibly across several recorded segments). Produce a thorough "
+            "record: full subjective history, all objective findings mentioned, a bulleted "
+            "assessment, and a COMPLETE plan INCLUDING any medications/prescriptions and advice "
+            "discussed. Return an EMPTY follow_up_questions array — no more questions."
+        )
+    else:
+        mode_note = (
+            "This is an INTERIM note during an ONGOING consultation. Summarise everything so far "
+            "and provide 3-5 follow-up suggestions the doctor could still explore."
+        )
     return f"""{_SYSTEM}
+
+{mode_note}
 
 PATIENT CONTEXT (may be empty):
 {context or "(none)"}
 
-CONSULTATION TRANSCRIPT:
+CONSULTATION TRANSCRIPT (may combine several recorded segments):
 {transcript}
 
 Return JSON with exactly this shape:
@@ -110,7 +126,7 @@ async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user))
 
     url = f"{GEMINI_BASE}/models/{s.gemini_model}:generateContent"
     payload = {
-        "contents": [{"parts": [{"text": _prompt(body.transcript, body.patient_context or "")}]}],
+        "contents": [{"parts": [{"text": _prompt(body.transcript, body.patient_context or "", body.mode)}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2},
     }
     try:
@@ -127,19 +143,20 @@ async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user))
 
     so = data.get("soap") or {}
     ent = data.get("entities") or {}
+    fups = [] if body.mode == "final" else [
+        {
+            "question": q.get("question", ""),
+            "concern": q.get("concern", ""),
+            "likelihood_pct": max(0, min(100, int(q.get("likelihood_pct") or 0))),
+            "severity": q.get("severity", "low"),
+        }
+        for q in (data.get("follow_up_questions") or []) if isinstance(q, dict) and q.get("question")
+    ]
     return {
         "dialogue": [d for d in (data.get("dialogue") or []) if isinstance(d, dict) and d.get("text")],
         "soap": {k: so.get(k, "") for k in ("subjective", "objective", "assessment", "plan")},
         "entities": {k: ent.get(k, []) for k in ("symptoms", "medications", "allergies", "diagnoses", "follow_up")},
-        "follow_up_questions": [
-            {
-                "question": q.get("question", ""),
-                "concern": q.get("concern", ""),
-                "likelihood_pct": max(0, min(100, int(q.get("likelihood_pct") or 0))),
-                "severity": q.get("severity", "low"),
-            }
-            for q in (data.get("follow_up_questions") or []) if isinstance(q, dict) and q.get("question")
-        ],
+        "follow_up_questions": fups,
     }
 
 

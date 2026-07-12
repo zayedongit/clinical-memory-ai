@@ -42,6 +42,8 @@ export default function ScribePage() {
   const [error, setError] = useState<string | null>(null);
   const [showSave, setShowSave] = useState(false);
   const [saved, setSaved] = useState<{ visit_id: string; patient_id: string } | null>(null);
+  const [segments, setSegments] = useState(0);
+  const [isFinal, setIsFinal] = useState(false);
 
   const ctxRef = useRef<AudioContext | null>(null);
   const procRef = useRef<ScriptProcessorNode | null>(null);
@@ -83,15 +85,17 @@ export default function ScribePage() {
     const form = new FormData(); form.append("file", blob, "consultation.wav");
     const r = await apiUpload("/scribe/transcribe", form); setBusy(null);
     if (!r.ok) { setError(`Transcription failed (${r.status}). ${await r.text()}`); return; }
-    setTranscript((await r.json()).transcript || "");
+    const seg = (await r.json()).transcript || "";
+    if (seg.trim()) { setTranscript((prev) => (prev.trim() ? prev.trim() + "\n" + seg : seg)); setSegments((n) => n + 1); }
   }
 
-  async function analyze() {
-    setBusy("Analysing conversation…"); setError(null); setSaved(null);
-    const r = await apiPost("/scribe/soap", { transcript }); setBusy(null);
+  async function analyze(mode: "interim" | "final") {
+    setBusy(mode === "final" ? "Finalising note…" : "Analysing conversation…"); setError(null); setSaved(null);
+    const r = await apiPost("/scribe/soap", { transcript, mode }); setBusy(null);
     if (!r.ok) { setError(`Analysis failed (${r.status}). ${await r.text()}`); return; }
     const d = await r.json();
-    setDialogue(d.dialogue || []); setSoap(d.soap); setEntities(d.entities); setFollowUps(d.follow_up_questions || []);
+    setDialogue(d.dialogue || []); setSoap(d.soap); setEntities(d.entities);
+    setFollowUps(d.follow_up_questions || []); setIsFinal(mode === "final");
   }
 
   if (saved) {
@@ -102,7 +106,7 @@ export default function ScribePage() {
           <p className="mt-1 text-sm text-slate-500">The reviewed note is now in the patient&apos;s memory log.</p>
           <div className="mt-4 flex justify-center gap-3">
             <Link href={`/patients/${saved.patient_id}`} className="btn-primary">View patient record</Link>
-            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); }}
+            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); }}
               className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">New consultation</button>
           </div>
         </div>
@@ -124,7 +128,11 @@ export default function ScribePage() {
         {!recording
           ? <button onClick={startRecording} disabled={!!busy} className="btn-primary">● Record</button>
           : <button onClick={stopRecording} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white">■ Stop</button>}
-        <span className="text-xs text-slate-500">{recording ? "Recording…" : busy ? busy : "Keep it short (~30s) for now."}</span>
+        <span className="text-xs text-slate-500">
+          {recording ? "Recording…" : busy ? busy
+            : segments > 0 ? `${segments} segment${segments > 1 ? "s" : ""} recorded — record more or analyse`
+            : "Keep each segment short (~30s) for now."}
+        </span>
       </div>
 
       {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
@@ -133,7 +141,18 @@ export default function ScribePage() {
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold text-slate-700">Transcript <span className="font-normal text-slate-400">(editable)</span></h2>
           <textarea value={transcript} onChange={(e) => setTranscript(e.target.value)} rows={4} className="field w-full" placeholder="Transcript…" />
-          <button onClick={analyze} disabled={!!busy || transcript.trim().length < 3} className="btn-primary mt-3">Analyse consultation</button>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button onClick={() => analyze("interim")} disabled={!!busy || transcript.trim().length < 3} className="btn-primary">
+              {soap ? "Re-analyse" : "Analyse consultation"}
+            </button>
+            {soap && (
+              <button onClick={() => analyze("final")} disabled={!!busy}
+                className="rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-500">
+                Finalise consultation
+              </button>
+            )}
+          </div>
+          <p className="mt-2 text-xs text-slate-400">Tip: press ● Record again to add the next part of the visit, then re-analyse. Finalise when the consultation is complete.</p>
         </section>
       )}
 
@@ -153,7 +172,11 @@ export default function ScribePage() {
 
       {soap && (
         <section className="mb-6 space-y-4">
-          <h2 className="text-sm font-semibold text-slate-700">SOAP note <span className="font-normal text-slate-400">(AI draft — review &amp; edit)</span></h2>
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+            {isFinal ? "Final note" : "SOAP note"}
+            {isFinal && <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">FINAL</span>}
+            <span className="font-normal text-slate-400">(AI draft — review &amp; edit)</span>
+          </h2>
           {(["subjective", "objective", "assessment", "plan"] as const).map((k) => (
             <div key={k}>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">{k}</label>
