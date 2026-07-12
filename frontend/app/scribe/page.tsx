@@ -157,7 +157,7 @@ export default function ScribePage() {
           {(["subjective", "objective", "assessment", "plan"] as const).map((k) => (
             <div key={k}>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">{k}</label>
-              <textarea value={soap[k]} onChange={(e) => setSoap({ ...soap, [k]: e.target.value })} rows={k === "plan" || k === "subjective" ? 3 : 2} className="field w-full" />
+              <textarea value={soap[k]} onChange={(e) => setSoap({ ...soap, [k]: e.target.value })} rows={k === "assessment" ? 5 : k === "objective" ? 2 : 3} className="field w-full" />
             </div>
           ))}
           {entities && (

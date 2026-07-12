@@ -55,7 +55,10 @@ export default function PatientDetail({ params }: { params: Promise<{ id: string
     setOpen(vid);
     if (!full[vid]) {
       const r = await apiGet(`/visits/${vid}`);
-      if (r.ok) setFull((f) => ({ ...f, [vid]: await r.json() }));
+      if (r.ok) {
+        const data = (await r.json()) as VisitFull;
+        setFull((f) => ({ ...f, [vid]: data }));
+      }
     }
   }
 
