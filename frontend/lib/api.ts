@@ -30,6 +30,10 @@ export async function apiPatch(path: string, body: unknown): Promise<Response> {
   });
 }
 
+export async function apiDelete(path: string): Promise<Response> {
+  return fetch(`${BASE}${path}`, { method: "DELETE", headers: await headers() });
+}
+
 // multipart upload (audio) — do NOT set Content-Type; the browser adds the boundary.
 export async function apiUpload(path: string, form: FormData): Promise<Response> {
   const { data } = await supabase.auth.getSession();

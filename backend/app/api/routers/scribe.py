@@ -1,15 +1,15 @@
-"""AI Clinical Scribe.
+"""AI Clinical Scribe — a background conversation listener.
 
-  POST /scribe/transcribe  — audio (multipart) -> transcript   (Sarvam STT)
-  POST /scribe/soap        — transcript -> SOAP note + entities (Gemini)
+  POST /scribe/transcribe  — audio (multipart) -> transcript          (Sarvam STT)
+  POST /scribe/soap        — transcript -> doctor/patient dialogue,
+                             SOAP note, entities, follow-up questions  (Gemini)
+  POST /scribe/save        — save the reviewed visit to a patient
+                             (existing or new) with today's date.
 
-Both require an authenticated clinic user. LLM/STT are the only AI in the app.
-The physician reviews and edits every output before it is saved.
-
-Gemini is called via its REST API with httpx (no SDK) for a clean, consistent
-HTTP layer across the app.
+Everything AI produces is a draft the physician reviews before saving.
 """
 import json
+from datetime import date, datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from ..deps import CurrentUser, get_current_user
 from ...core.config import get_settings
+from ...core.supabase import audit, rest, user_headers
 
 router = APIRouter(prefix="/scribe")
 
@@ -28,10 +29,7 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 # Speech-to-text (Sarvam)
 # --------------------------------------------------------------------- #
 @router.post("/transcribe")
-async def transcribe(
-    file: UploadFile = File(...),
-    user: CurrentUser = Depends(get_current_user),
-):
+async def transcribe(file: UploadFile = File(...), user: CurrentUser = Depends(get_current_user)):
     s = get_settings()
     if not s.sarvam_api_key:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "SARVAM_API_KEY not configured")
@@ -51,7 +49,7 @@ async def transcribe(
 
 
 # --------------------------------------------------------------------- #
-# SOAP generation (Gemini REST)
+# Analysis: dialogue + SOAP + entities + follow-up questions (Gemini)
 # --------------------------------------------------------------------- #
 class SoapRequest(BaseModel):
     transcript: str
@@ -59,11 +57,15 @@ class SoapRequest(BaseModel):
 
 
 _SYSTEM = (
-    "You are an AI clinical documentation assistant. You are NOT a doctor and never "
-    "diagnose or prescribe. Given a doctor-patient consultation transcript (which may mix "
-    "Hindi and English / Hinglish), produce a concise, structured SOAP note in clinical "
-    "English and extract key entities. Only include information supported by the transcript. "
-    "The physician will review and edit everything. Return STRICT JSON only."
+    "You are an AI clinical documentation assistant listening to a doctor-patient "
+    "consultation (which may mix Hindi and English / Hinglish). You are NOT a doctor and "
+    "never diagnose or prescribe. From the transcript you must: (1) reconstruct the "
+    "conversation as a back-and-forth, labelling each turn as the doctor or the patient "
+    "(the doctor asks questions and gives advice; the patient describes symptoms and answers); "
+    "(2) write a concise SOAP note in clinical English based on that exchange; "
+    "(3) extract key entities; (4) suggest follow-up questions the doctor could ask to clarify "
+    "or rule out serious conditions. Only use information supported by the transcript. "
+    "Everything is for physician review only. Return STRICT JSON."
 )
 
 
@@ -78,12 +80,16 @@ CONSULTATION TRANSCRIPT:
 
 Return JSON with exactly this shape:
 {{
+  "dialogue": [{{"speaker": "doctor" | "patient", "text": ""}}],
   "soap": {{"subjective": "", "objective": "", "assessment": "", "plan": ""}},
-  "entities": {{
-    "symptoms": [], "medications": [], "allergies": [], "diagnoses": [], "follow_up": []
-  }}
+  "entities": {{"symptoms": [], "medications": [], "allergies": [], "diagnoses": [], "follow_up": []}},
+  "follow_up_questions": [
+    {{"question": "", "concern": "what this probes / could reveal",
+      "likelihood_pct": 0, "severity": "low" | "moderate" | "high"}}
+  ]
 }}
-Use empty strings/arrays where the transcript gives no information. Do not invent findings."""
+Provide 3-5 follow-up questions. likelihood_pct (0-100) = how clinically important it is to
+ask this, given the presentation. Do not invent findings. Empty strings/arrays where unknown."""
 
 
 @router.post("/soap")
@@ -106,27 +112,95 @@ async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user))
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"SOAP request failed: {e}")
     if r.status_code != 200:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"SOAP error {r.status_code}: {r.text[:400]}")
-
     try:
-        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        data = json.loads(text)
+        data = json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
     except (KeyError, IndexError, json.JSONDecodeError, TypeError):
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Model returned unexpected output")
 
-    soap_obj = data.get("soap") or {}
+    so = data.get("soap") or {}
     ent = data.get("entities") or {}
     return {
-        "soap": {
-            "subjective": soap_obj.get("subjective", ""),
-            "objective": soap_obj.get("objective", ""),
-            "assessment": soap_obj.get("assessment", ""),
-            "plan": soap_obj.get("plan", ""),
-        },
-        "entities": {
-            "symptoms": ent.get("symptoms", []),
-            "medications": ent.get("medications", []),
-            "allergies": ent.get("allergies", []),
-            "diagnoses": ent.get("diagnoses", []),
-            "follow_up": ent.get("follow_up", []),
-        },
+        "dialogue": [d for d in (data.get("dialogue") or []) if isinstance(d, dict) and d.get("text")],
+        "soap": {k: so.get(k, "") for k in ("subjective", "objective", "assessment", "plan")},
+        "entities": {k: ent.get(k, []) for k in ("symptoms", "medications", "allergies", "diagnoses", "follow_up")},
+        "follow_up_questions": [
+            {
+                "question": q.get("question", ""),
+                "concern": q.get("concern", ""),
+                "likelihood_pct": max(0, min(100, int(q.get("likelihood_pct") or 0))),
+                "severity": q.get("severity", "low"),
+            }
+            for q in (data.get("follow_up_questions") or []) if isinstance(q, dict) and q.get("question")
+        ],
     }
+
+
+# --------------------------------------------------------------------- #
+# Save the reviewed visit to a patient (existing or new)
+# --------------------------------------------------------------------- #
+class NewPatient(BaseModel):
+    name: str
+    age: int | None = None
+    gender: str | None = None
+    phone: str | None = None
+    height_cm: float | None = None
+    weight_kg: float | None = None
+
+
+class SaveRequest(BaseModel):
+    patient_id: str | None = None
+    new_patient: NewPatient | None = None
+    transcript: str | None = None
+    dialogue: list | None = None
+    soap: dict | None = None
+    entities: dict | None = None
+    follow_up_questions: list | None = None
+
+
+@router.post("/save")
+async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user)):
+    h = user_headers(user.token)
+
+    # 1. Resolve or create the patient.
+    if body.patient_id:
+        patient_id = body.patient_id
+    elif body.new_patient:
+        np = body.new_patient
+        dob = f"{date.today().year - np.age:04d}-01-01" if np.age else None
+        payload = {
+            "clinic_id": user.clinic_id, "name": np.name, "gender": np.gender,
+            "phone": np.phone, "dob": dob, "height_cm": np.height_cm, "weight_kg": np.weight_kg,
+        }
+        r = await rest("POST", "patients", headers=h, json=payload, prefer="return=representation")
+        if r.status_code not in (200, 201):
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Patient create failed: {r.text[:300]}")
+        patient_id = r.json()[0]["id"]
+    else:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide patient_id or new_patient")
+
+    # 2. Create the visit (approved).
+    now = datetime.now(timezone.utc).isoformat()
+    v = await rest("POST", "visits", headers=h, prefer="return=representation", json={
+        "patient_id": patient_id, "clinic_id": user.clinic_id, "doctor_id": user.user_id,
+        "status": "approved", "approved_at": now,
+    })
+    if v.status_code not in (200, 201):
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Visit create failed: {v.text[:300]}")
+    visit_id = v.json()[0]["id"]
+
+    # 3. Store the note.
+    so = body.soap or {}
+    n = await rest("POST", "soap_notes", headers=h, prefer="return=representation", json={
+        "visit_id": visit_id, "patient_id": patient_id, "clinic_id": user.clinic_id,
+        "transcript": body.transcript, "dialogue": body.dialogue or [],
+        "subjective": so.get("subjective"), "objective": so.get("objective"),
+        "assessment": so.get("assessment"), "plan": so.get("plan"),
+        "entities": body.entities or {}, "follow_up_questions": body.follow_up_questions or [],
+        "created_by": user.user_id,
+    })
+    if n.status_code not in (200, 201):
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Note save failed: {n.text[:300]}")
+
+    await audit(clinic_id=user.clinic_id, actor_id=user.user_id, action="save_visit",
+                entity="visit", entity_id=visit_id, after={"patient_id": patient_id})
+    return {"visit_id": visit_id, "patient_id": patient_id}
