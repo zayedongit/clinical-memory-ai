@@ -110,6 +110,7 @@ export default function PatientsPage() {
           <p className="text-sm text-slate-500">{me?.clinic_name}</p>
         </div>
         <div className="flex items-center gap-4">
+          <Link href="/scribe" className="text-sm font-medium text-blue-600 transition hover:text-blue-700">New consultation</Link>
           <Link href="/lookup" className="text-sm font-medium text-blue-600 transition hover:text-blue-700">Clinical lookup</Link>
           <button onClick={signOut} className="text-sm text-slate-500 transition hover:text-slate-900">Sign out</button>
         </div>

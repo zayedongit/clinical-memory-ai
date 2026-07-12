@@ -29,3 +29,12 @@ export async function apiPatch(path: string, body: unknown): Promise<Response> {
     body: JSON.stringify(body),
   });
 }
+
+// multipart upload (audio) — do NOT set Content-Type; the browser adds the boundary.
+export async function apiUpload(path: string, form: FormData): Promise<Response> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  const h: Record<string, string> = {};
+  if (token) h["Authorization"] = `Bearer ${token}`;
+  return fetch(`${BASE}${path}`, { method: "POST", headers: h, body: form });
+}

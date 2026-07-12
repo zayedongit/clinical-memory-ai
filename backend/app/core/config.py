@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # AI providers (Phase 1)
     gemini_api_key: str = ""
     sarvam_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    sarvam_stt_model: str = "saarika:v2.5"
+    sarvam_stt_language: str = "unknown"  # auto-detect / code-mixed (Hinglish)
 
     # App
     frontend_origin: str = "http://localhost:3000"
