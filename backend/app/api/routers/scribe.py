@@ -88,8 +88,16 @@ Return JSON with exactly this shape:
       "likelihood_pct": 0, "severity": "low" | "moderate" | "high"}}
   ]
 }}
-Provide 3-5 follow-up questions. likelihood_pct (0-100) = how clinically important it is to
-ask this, given the presentation. Do not invent findings. Empty strings/arrays where unknown."""
+
+Formatting rules:
+- "assessment": write as SHORT bullet points for fast reading — each line begins with "- ",
+  terse phrases (a brief differential + key uncertainties). NOT a paragraph.
+- "subjective", "objective", "plan": concise prose.
+- Each follow-up "question": phrase it as a brief INSTRUCTION to the doctor, starting with
+  "Ask about", "Ask for", "Check for", or "Assess" (e.g. "Ask about shortness of breath at rest").
+  Do NOT write it as a verbatim question to the patient.
+Provide 3-5 follow-ups. likelihood_pct (0-100) = how clinically important it is, given the
+presentation. Do not invent findings. Empty strings/arrays where unknown."""
 
 
 @router.post("/soap")
