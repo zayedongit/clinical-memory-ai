@@ -43,6 +43,8 @@ class PatientResponse(BaseModel):
     dob: date | None = None
     gender: str | None = None
     phone: str | None = None
+    height_cm: float | None = None
+    weight_kg: float | None = None
     created_at: datetime | None = None
 
 

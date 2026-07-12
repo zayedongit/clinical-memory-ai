@@ -13,7 +13,7 @@ from ...schemas import (
 
 router = APIRouter(prefix="/patients")
 
-_SELECT = "id,name,dob,gender,phone,created_at"
+_SELECT = "id,name,dob,gender,phone,height_cm,weight_kg,created_at"
 
 
 @router.get("", response_model=PatientListResponse)

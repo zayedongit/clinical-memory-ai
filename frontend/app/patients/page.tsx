@@ -139,11 +139,14 @@ export default function PatientsPage() {
         ) : (
           <ul className="divide-y divide-slate-200/70">
             {patients.map((p) => (
-              <li key={p.id} className="flex items-center justify-between px-5 py-3.5">
-                <span className="font-medium text-slate-900">{p.name}</span>
-                <span className="text-sm text-slate-500">
-                  {[p.gender, p.phone].filter(Boolean).join(" · ")}
-                </span>
+              <li key={p.id}>
+                <Link href={`/patients/${p.id}`}
+                  className="flex items-center justify-between px-5 py-3.5 transition hover:bg-slate-50/60">
+                  <span className="font-medium text-slate-900">{p.name}</span>
+                  <span className="text-sm text-slate-500">
+                    {[p.gender, p.phone].filter(Boolean).join(" · ")}
+                  </span>
+                </Link>
               </li>
             ))}
           </ul>
