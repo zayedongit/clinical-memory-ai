@@ -11,24 +11,26 @@ type Entities = { symptoms: string[]; medications: string[]; allergies: string[]
 type Turn = { speaker: "doctor" | "patient"; text: string };
 type FollowUp = { question: string; concern: string; likelihood_pct: number; severity: string };
 type Patient = { id: string; name: string };
+type Summary = {
+  visit_count: number; problems: string[]; medications: string[]; allergies: string[];
+  recurring_symptoms: { term: string; count: number }[];
+  recent_visits: { date: string; assessment: string }[];
+  since_last: { new_symptoms?: string[]; resolved_symptoms?: string[]; new_medications?: string[]; stopped_medications?: string[] };
+  context_text: string;
+};
 
 function encodeWav(samples: Float32Array, sampleRate: number): Blob {
-  const buf = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buf);
+  const buf = new ArrayBuffer(44 + samples.length * 2); const view = new DataView(buf);
   const str = (o: number, s: string) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
   str(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); str(8, "WAVE");
   str(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
   str(36, "data"); view.setUint32(40, samples.length * 2, true);
-  let o = 44;
-  for (let i = 0; i < samples.length; i++) { const v = Math.max(-1, Math.min(1, samples[i])); view.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7fff, true); o += 2; }
+  let o = 44; for (let i = 0; i < samples.length; i++) { const v = Math.max(-1, Math.min(1, samples[i])); view.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7fff, true); o += 2; }
   return new Blob([view], { type: "audio/wav" });
 }
 
-const sevColor: Record<string, string> = {
-  high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600",
-};
+const sevColor: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
 
 export default function ScribePage() {
   const router = useRouter();
@@ -44,6 +46,11 @@ export default function ScribePage() {
   const [saved, setSaved] = useState<{ visit_id: string; patient_id: string } | null>(null);
   const [segments, setSegments] = useState(0);
   const [isFinal, setIsFinal] = useState(false);
+  // longitudinal
+  const [patientId, setPatientId] = useState<string | null>(null);
+  const [patientName, setPatientName] = useState("");
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [showHistory, setShowHistory] = useState(true);
 
   const ctxRef = useRef<AudioContext | null>(null);
   const procRef = useRef<ScriptProcessorNode | null>(null);
@@ -52,27 +59,37 @@ export default function ScribePage() {
   const chunksRef = useRef<Float32Array[]>([]);
   const rateRef = useRef(48000);
 
-  useEffect(() => { (async () => { const { data } = await supabase.auth.getSession(); if (!data.session) router.push("/login"); })(); }, [router]);
+  async function attach(pid: string) {
+    const [p, s] = await Promise.all([apiGet(`/patients/${pid}`), apiGet(`/patients/${pid}/summary`)]);
+    if (p.ok) { setPatientId(pid); setPatientName((await p.json()).name); }
+    if (s.ok) setSummary(await s.json());
+  }
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      if (!data.session) { router.push("/login"); return; }
+      const pid = new URLSearchParams(window.location.search).get("patient");
+      if (pid) await attach(pid);
+    })();
+  }, [router]);
 
   async function startRecording() {
     setError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); streamRef.current = stream;
       const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const ctx = new AC(); ctxRef.current = ctx; rateRef.current = ctx.sampleRate;
-      const src = ctx.createMediaStreamSource(stream); srcRef.current = src;
+      const s2 = ctx.createMediaStreamSource(stream); srcRef.current = s2;
       const proc = ctx.createScriptProcessor(4096, 1, 1); procRef.current = proc; chunksRef.current = [];
       proc.onaudioprocess = (e) => chunksRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-      const mute = ctx.createGain(); mute.gain.value = 0;
-      src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+      const mute = ctx.createGain(); mute.gain.value = 0; s2.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
       setRecording(true);
     } catch { setError("Microphone access denied or unavailable."); }
   }
 
   async function stopRecording() {
-    setRecording(false);
-    procRef.current?.disconnect(); srcRef.current?.disconnect();
+    setRecording(false); procRef.current?.disconnect(); srcRef.current?.disconnect();
     streamRef.current?.getTracks().forEach((t) => t.stop()); await ctxRef.current?.close();
     const chunks = chunksRef.current; const len = chunks.reduce((a, c) => a + c.length, 0);
     if (len === 0) { setError("No audio captured."); return; }
@@ -91,7 +108,7 @@ export default function ScribePage() {
 
   async function analyze(mode: "interim" | "final") {
     setBusy(mode === "final" ? "Finalising note…" : "Analysing conversation…"); setError(null); setSaved(null);
-    const r = await apiPost("/scribe/soap", { transcript, mode }); setBusy(null);
+    const r = await apiPost("/scribe/soap", { transcript, mode, patient_context: summary?.context_text }); setBusy(null);
     if (!r.ok) { setError(`Analysis failed (${r.status}). ${await r.text()}`); return; }
     const d = await r.json();
     setDialogue(d.dialogue || []); setSoap(d.soap); setEntities(d.entities);
@@ -116,13 +133,35 @@ export default function ScribePage() {
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-10">
-      <header className="mb-6 flex items-end justify-between">
+      <header className="mb-4 flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">New Consultation</h1>
           <p className="text-sm text-slate-500">Records the doctor–patient conversation → dialogue, SOAP, follow-ups. Physician reviews everything.</p>
         </div>
         <Link href="/patients" className="text-sm text-slate-500 transition hover:text-slate-900">← Patients</Link>
       </header>
+
+      {/* Patient attach + history */}
+      <div className="glass mb-4 flex items-center justify-between rounded-2xl px-4 py-3">
+        {patientId ? (
+          <>
+            <div>
+              <span className="text-sm font-medium text-slate-900">{patientName}</span>
+              {summary && summary.visit_count > 0 && <span className="ml-2 text-xs text-emerald-600">history-aware · {summary.visit_count} prior visit{summary.visit_count > 1 ? "s" : ""}</span>}
+            </div>
+            <div className="flex items-center gap-3 text-sm">
+              {summary && summary.visit_count > 0 && <button onClick={() => setShowHistory(!showHistory)} className="text-blue-600">{showHistory ? "Hide history" : "Show history"}</button>}
+              <button onClick={() => { setPatientId(null); setSummary(null); setPatientName(""); }} className="text-slate-400 hover:text-slate-700">Detach</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <span className="text-sm text-slate-500">No patient attached — attach one to make the note history-aware.</span>
+            <AttachPatient onAttach={attach} />
+          </>
+        )}
+      </div>
+      {patientId && showHistory && summary && summary.visit_count > 0 && <HistoryPanel s={summary} />}
 
       <div className="glass mb-6 flex items-center gap-4 rounded-2xl p-4">
         {!recording
@@ -142,15 +181,8 @@ export default function ScribePage() {
           <h2 className="mb-2 text-sm font-semibold text-slate-700">Transcript <span className="font-normal text-slate-400">(editable)</span></h2>
           <textarea value={transcript} onChange={(e) => setTranscript(e.target.value)} rows={4} className="field w-full" placeholder="Transcript…" />
           <div className="mt-3 flex flex-wrap gap-2">
-            <button onClick={() => analyze("interim")} disabled={!!busy || transcript.trim().length < 3} className="btn-primary">
-              {soap ? "Re-analyse" : "Analyse consultation"}
-            </button>
-            {soap && (
-              <button onClick={() => analyze("final")} disabled={!!busy}
-                className="rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-500">
-                Finalise consultation
-              </button>
-            )}
+            <button onClick={() => analyze("interim")} disabled={!!busy || transcript.trim().length < 3} className="btn-primary">{soap ? "Re-analyse" : "Analyse consultation"}</button>
+            {soap && <button onClick={() => analyze("final")} disabled={!!busy} className="rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-500">Finalise consultation</button>}
           </div>
           <p className="mt-2 text-xs text-slate-400">Tip: press ● Record again to add the next part of the visit, then re-analyse. Finalise when the consultation is complete.</p>
         </section>
@@ -161,7 +193,7 @@ export default function ScribePage() {
           <h2 className="mb-2 text-sm font-semibold text-slate-700">Conversation</h2>
           <div className="glass space-y-2 rounded-2xl p-4">
             {dialogue.map((t, i) => (
-              <div key={i} className={t.speaker === "doctor" ? "text-left" : "text-left"}>
+              <div key={i}>
                 <span className={`mr-2 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${t.speaker === "doctor" ? "bg-blue-100 text-blue-700" : "bg-emerald-100 text-emerald-700"}`}>{t.speaker}</span>
                 <span className="text-sm text-slate-700">{t.text}</span>
               </div>
@@ -207,9 +239,7 @@ export default function ScribePage() {
                 </div>
                 {f.concern && <p className="mt-1 text-xs text-slate-500">{f.concern}</p>}
                 <div className="mt-2 flex items-center gap-2">
-                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
-                    <div className="h-full rounded-full bg-blue-500" style={{ width: `${f.likelihood_pct}%` }} />
-                  </div>
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-blue-500" style={{ width: `${f.likelihood_pct}%` }} /></div>
                   <span className="text-[11px] text-slate-400">{f.likelihood_pct}% relevance</span>
                 </div>
               </div>
@@ -218,27 +248,77 @@ export default function ScribePage() {
         </section>
       )}
 
-      {soap && (
-        <div className="flex justify-end">
-          <button onClick={() => setShowSave(true)} className="btn-primary">Save visit</button>
-        </div>
-      )}
+      {soap && <div className="flex justify-end"><button onClick={() => setShowSave(true)} className="btn-primary">Save visit</button></div>}
 
       {showSave && soap && (
-        <SaveModal
-          onClose={() => setShowSave(false)}
-          onSaved={(res) => { setShowSave(false); setSaved(res); }}
-          payload={{ transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps }}
-        />
+        <SaveModal onClose={() => setShowSave(false)} onSaved={(res) => { setShowSave(false); setSaved(res); }}
+          defaultPatient={patientId ? { id: patientId, name: patientName } : undefined}
+          payload={{ transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps }} />
       )}
     </main>
   );
 }
 
-function SaveModal({ onClose, onSaved, payload }: {
-  onClose: () => void;
-  onSaved: (r: { visit_id: string; patient_id: string }) => void;
-  payload: Record<string, unknown>;
+function Line({ label, items, tone }: { label: string; items: string[]; tone?: string }) {
+  return (
+    <div className="mb-1"><span className="text-xs font-medium text-slate-500">{label}: </span>
+      {items.map((x, i) => <span key={i} className={`mr-1 inline-block rounded-full px-2 py-0.5 text-xs ${tone === "red" ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-600"}`}>{x}</span>)}
+    </div>
+  );
+}
+
+function HistoryPanel({ s }: { s: Summary }) {
+  const sl = s.since_last || {};
+  const changed = (sl.new_symptoms?.length || sl.resolved_symptoms?.length || sl.new_medications?.length || sl.stopped_medications?.length);
+  return (
+    <div className="glass mb-6 rounded-2xl p-4">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Patient history (used by the note)</p>
+      {s.problems.length > 0 && <Line label="Problems" items={s.problems} />}
+      {s.medications.length > 0 && <Line label="Medications" items={s.medications} />}
+      {s.allergies.length > 0 && <Line label="Allergies" items={s.allergies} tone="red" />}
+      {s.recurring_symptoms.length > 0 && <Line label="Recurring" items={s.recurring_symptoms.map((r) => `${r.term} ×${r.count}`)} />}
+      {changed ? (
+        <div className="mt-2 border-t border-slate-200/70 pt-2 text-xs text-slate-600">
+          <p className="mb-1 font-semibold text-slate-600">Since last visit</p>
+          {sl.new_symptoms?.length ? <p>New symptoms: {sl.new_symptoms.join(", ")}</p> : null}
+          {sl.resolved_symptoms?.length ? <p>Resolved: {sl.resolved_symptoms.join(", ")}</p> : null}
+          {sl.new_medications?.length ? <p>Started: {sl.new_medications.join(", ")}</p> : null}
+          {sl.stopped_medications?.length ? <p>Stopped: {sl.stopped_medications.join(", ")}</p> : null}
+        </div>
+      ) : null}
+      {s.recent_visits.length > 0 && (
+        <div className="mt-2 border-t border-slate-200/70 pt-2">
+          <p className="mb-1 text-xs font-semibold text-slate-600">Recent visits</p>
+          {s.recent_visits.map((v, i) => <p key={i} className="text-xs text-slate-500">{new Date(v.date).toLocaleDateString()} — {v.assessment || "—"}</p>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AttachPatient({ onAttach }: { onAttach: (id: string) => void }) {
+  const [q, setQ] = useState(""); const [list, setList] = useState<Patient[]>([]); const [open, setOpen] = useState(false);
+  useEffect(() => { if (open && list.length === 0) apiGet("/patients").then(async (r) => { if (r.ok) setList((await r.json()).items || []); }); }, [open, list.length]);
+  const f = list.filter((p) => p.name.toLowerCase().includes(q.toLowerCase()));
+  return (
+    <div className="relative">
+      <button onClick={() => setOpen(!open)} className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white">Attach patient</button>
+      {open && (
+        <div className="absolute right-0 z-10 mt-1 w-64 rounded-xl border border-slate-200 bg-white p-2 shadow-lg">
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" className="field mb-1 w-full" />
+          <div className="max-h-48 overflow-y-auto">
+            {f.length === 0 ? <p className="p-2 text-xs text-slate-400">No patients.</p> :
+              f.map((p) => <button key={p.id} onClick={() => { onAttach(p.id); setOpen(false); }} className="block w-full rounded px-2 py-1.5 text-left text-sm text-slate-800 hover:bg-slate-50">{p.name}</button>)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SaveModal({ onClose, onSaved, payload, defaultPatient }: {
+  onClose: () => void; onSaved: (r: { visit_id: string; patient_id: string }) => void;
+  payload: Record<string, unknown>; defaultPatient?: { id: string; name: string };
 }) {
   const [tab, setTab] = useState<"existing" | "new">("existing");
   const [patients, setPatients] = useState<Patient[]>([]);
@@ -247,13 +327,12 @@ function SaveModal({ onClose, onSaved, payload }: {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => { (async () => { const r = await apiGet("/patients"); if (r.ok) setPatients((await r.json()).items || []); })(); }, []);
+  useEffect(() => { apiGet("/patients").then(async (r) => { if (r.ok) setPatients((await r.json()).items || []); }); }, []);
   const filtered = useMemo(() => patients.filter((p) => p.name.toLowerCase().includes(q.toLowerCase())), [patients, q]);
 
   async function save(body: Record<string, unknown>) {
     setBusy(true); setErr(null);
-    const r = await apiPost("/scribe/save", { ...payload, ...body });
-    setBusy(false);
+    const r = await apiPost("/scribe/save", { ...payload, ...body }); setBusy(false);
     if (!r.ok) { setErr(`Save failed (${r.status}).`); return; }
     onSaved(await r.json());
   }
@@ -261,21 +340,21 @@ function SaveModal({ onClose, onSaved, payload }: {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 px-4" onClick={onClose}>
       <div className="glass w-full max-w-md rounded-2xl p-6" onClick={(e) => e.stopPropagation()}>
-        <h3 className="mb-3 text-base font-semibold text-slate-900">Save this visit to…</h3>
+        <h3 className="mb-3 text-base font-semibold text-slate-900">Save this visit</h3>
+        {defaultPatient && (
+          <button disabled={busy} onClick={() => save({ patient_id: defaultPatient.id })}
+            className="btn-primary mb-3 w-full">Save to {defaultPatient.name}</button>
+        )}
         <div className="mb-4 flex gap-2">
-          <button onClick={() => setTab("existing")} className={`flex-1 rounded-lg px-3 py-2 text-sm ${tab === "existing" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600"}`}>Existing patient</button>
+          <button onClick={() => setTab("existing")} className={`flex-1 rounded-lg px-3 py-2 text-sm ${tab === "existing" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600"}`}>Another existing</button>
           <button onClick={() => setTab("new")} className={`flex-1 rounded-lg px-3 py-2 text-sm ${tab === "new" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600"}`}>New patient</button>
         </div>
-
         {tab === "existing" ? (
           <div>
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search patients…" className="field mb-2 w-full" />
             <div className="max-h-56 overflow-y-auto rounded-lg border border-slate-200">
               {filtered.length === 0 ? <p className="p-3 text-sm text-slate-400">No patients.</p> :
-                filtered.map((p) => (
-                  <button key={p.id} disabled={busy} onClick={() => save({ patient_id: p.id })}
-                    className="block w-full px-3 py-2.5 text-left text-sm text-slate-800 hover:bg-slate-50">{p.name}</button>
-                ))}
+                filtered.map((p) => <button key={p.id} disabled={busy} onClick={() => save({ patient_id: p.id })} className="block w-full px-3 py-2.5 text-left text-sm text-slate-800 hover:bg-slate-50">{p.name}</button>)}
             </div>
           </div>
         ) : (
@@ -293,12 +372,8 @@ function SaveModal({ onClose, onSaved, payload }: {
             </div>
             <input placeholder="Phone" value={np.phone} onChange={(e) => setNp({ ...np, phone: e.target.value })} className="field w-full" />
             <button disabled={busy || !np.name.trim()} onClick={() => save({
-              new_patient: {
-                name: np.name, gender: np.gender || null, phone: np.phone || null,
-                age: np.age ? parseInt(np.age) : null,
-                height_cm: np.height_cm ? parseFloat(np.height_cm) : null,
-                weight_kg: np.weight_kg ? parseFloat(np.weight_kg) : null,
-              },
+              new_patient: { name: np.name, gender: np.gender || null, phone: np.phone || null,
+                age: np.age ? parseInt(np.age) : null, height_cm: np.height_cm ? parseFloat(np.height_cm) : null, weight_kg: np.weight_kg ? parseFloat(np.weight_kg) : null },
             })} className="btn-primary w-full">{busy ? "Saving…" : "Create patient & save visit"}</button>
           </div>
         )}

@@ -7,6 +7,67 @@ from ...core.supabase import audit, rest, user_headers
 router = APIRouter()
 
 
+def _ents(note: dict, key: str) -> list[str]:
+    e = note.get("entities") or {}
+    return [str(x).strip() for x in (e.get(key) or []) if str(x).strip()]
+
+
+@router.get("/patients/{patient_id}/summary")
+async def patient_summary(patient_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Deterministic longitudinal summary across a patient's visits — the memory
+    the scribe uses as context and the patient page shows as trends."""
+    r = await rest(
+        "GET", "soap_notes", headers=user_headers(user.token),
+        params={"patient_id": f"eq.{patient_id}", "select": "created_at,assessment,entities",
+                "order": "created_at.asc"},
+    )
+    notes = r.json() if r.status_code == 200 else []
+
+    problems, meds, allergies = set(), set(), set()
+    sym_counts: dict[str, int] = {}
+    per_visit_syms, per_visit_meds = [], []
+    for n in notes:
+        problems.update(_ents(n, "diagnoses"))
+        meds.update(_ents(n, "medications"))
+        allergies.update(_ents(n, "allergies"))
+        syms = {s.lower() for s in _ents(n, "symptoms")}
+        per_visit_syms.append(syms)
+        per_visit_meds.append({m.lower() for m in _ents(n, "medications")})
+        for s in syms:
+            sym_counts[s] = sym_counts.get(s, 0) + 1
+
+    recurring = sorted(
+        [{"term": s, "count": c} for s, c in sym_counts.items() if c >= 2],
+        key=lambda x: -x["count"],
+    )
+    since_last: dict[str, list[str]] = {}
+    if len(notes) >= 2:
+        since_last = {
+            "new_symptoms": sorted(per_visit_syms[-1] - per_visit_syms[-2]),
+            "resolved_symptoms": sorted(per_visit_syms[-2] - per_visit_syms[-1]),
+            "new_medications": sorted(per_visit_meds[-1] - per_visit_meds[-2]),
+            "stopped_medications": sorted(per_visit_meds[-2] - per_visit_meds[-1]),
+        }
+    recent = [{"date": n["created_at"], "assessment": (n.get("assessment") or "").strip()[:200]}
+              for n in notes[-3:]][::-1]
+
+    parts: list[str] = []
+    if notes:
+        parts.append(f"{len(notes)} prior visit(s) on record.")
+        if problems:  parts.append("Known problems: " + ", ".join(sorted(problems)) + ".")
+        if meds:      parts.append("Previously noted medications: " + ", ".join(sorted(meds)) + ".")
+        if allergies: parts.append("Allergies: " + ", ".join(sorted(allergies)) + ".")
+        if recurring: parts.append("Recurring symptoms: " + ", ".join(f"{x['term']} (x{x['count']})" for x in recurring[:5]) + ".")
+        if since_last.get("new_symptoms"): parts.append("New since last visit: " + ", ".join(since_last["new_symptoms"]) + ".")
+
+    return {
+        "visit_count": len(notes),
+        "problems": sorted(problems), "medications": sorted(meds), "allergies": sorted(allergies),
+        "recurring_symptoms": recurring, "recent_visits": recent, "since_last": since_last,
+        "context_text": " ".join(parts),
+    }
+
+
 @router.get("/patients/{patient_id}/visits")
 async def list_visits(patient_id: str, user: CurrentUser = Depends(get_current_user)):
     r = await rest(

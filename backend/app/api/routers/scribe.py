@@ -65,8 +65,11 @@ _SYSTEM = (
     "(the doctor asks questions and gives advice; the patient describes symptoms and answers); "
     "(2) write a concise SOAP note in clinical English based on that exchange; "
     "(3) extract key entities; (4) suggest follow-up questions the doctor could ask to clarify "
-    "or rule out serious conditions. Only use information supported by the transcript. "
-    "Everything is for physician review only. Return STRICT JSON."
+    "or rule out serious conditions. Base the note on the transcript AND the provided patient "
+    "history/context — you may reference relevant known history (conditions, current medications, "
+    "allergies, recurring issues) to make the note continuity-aware — but never invent facts "
+    "beyond what the transcript and context provide. Everything is for physician review only. "
+    "Return STRICT JSON."
 )
 
 
