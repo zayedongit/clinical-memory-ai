@@ -14,6 +14,11 @@ type Note = {
   entities: Record<string, string[]>; follow_up_questions: { question: string; likelihood_pct: number; severity: string }[];
 };
 type VisitFull = { id: string; date: string | null; note: Note | null };
+type Summary = {
+  visit_count: number; problems: string[]; medications: string[]; allergies: string[];
+  recurring_symptoms: { term: string; count: number }[];
+  since_last: { new_symptoms?: string[]; resolved_symptoms?: string[]; new_medications?: string[]; stopped_medications?: string[] };
+};
 
 function ageFrom(dob: string | null): string {
   if (!dob) return "—";
@@ -30,15 +35,17 @@ export default function PatientDetail({ params }: { params: Promise<{ id: string
   const router = useRouter();
   const [patient, setPatient] = useState<Patient | null>(null);
   const [visits, setVisits] = useState<VisitRow[]>([]);
+  const [summary, setSummary] = useState<Summary | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [full, setFull] = useState<Record<string, VisitFull>>({});
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
-    const [p, v] = await Promise.all([apiGet(`/patients/${id}`), apiGet(`/patients/${id}/visits`)]);
+    const [p, v, s] = await Promise.all([apiGet(`/patients/${id}`), apiGet(`/patients/${id}/visits`), apiGet(`/patients/${id}/summary`)]);
     if (p.ok) setPatient(await p.json());
     if (v.ok) setVisits((await v.json()).items || []);
+    if (s.ok) setSummary(await s.json());
     setLoading(false);
   }, [id]);
 
@@ -83,10 +90,30 @@ export default function PatientDetail({ params }: { params: Promise<{ id: string
           </p>
         </div>
         <div className="flex items-center gap-4">
-          <Link href="/scribe" className="text-sm font-medium text-blue-600 hover:text-blue-700">New consultation</Link>
+          <Link href={`/scribe?patient=${id}`} className="text-sm font-medium text-blue-600 hover:text-blue-700">New consultation</Link>
           <Link href="/patients" className="text-sm text-slate-500 hover:text-slate-900">← Patients</Link>
         </div>
       </header>
+
+      {summary && summary.visit_count > 0 && (
+        <div className="glass mb-6 rounded-2xl p-4">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Longitudinal overview</p>
+          {summary.problems.length > 0 && <p className="mb-1 text-sm text-slate-600"><span className="font-medium text-slate-500">Problems:</span> {summary.problems.join(", ")}</p>}
+          {summary.medications.length > 0 && <p className="mb-1 text-sm text-slate-600"><span className="font-medium text-slate-500">Medications:</span> {summary.medications.join(", ")}</p>}
+          {summary.allergies.length > 0 && <p className="mb-1 text-sm text-red-600"><span className="font-medium">Allergies:</span> {summary.allergies.join(", ")}</p>}
+          {summary.recurring_symptoms.length > 0 && <p className="mb-1 text-sm text-slate-600"><span className="font-medium text-slate-500">Recurring:</span> {summary.recurring_symptoms.map((r) => `${r.term} ×${r.count}`).join(", ")}</p>}
+          {(() => {
+            const sl = summary.since_last || {};
+            const bits = [
+              sl.new_symptoms?.length ? `new: ${sl.new_symptoms.join(", ")}` : "",
+              sl.resolved_symptoms?.length ? `resolved: ${sl.resolved_symptoms.join(", ")}` : "",
+              sl.new_medications?.length ? `started: ${sl.new_medications.join(", ")}` : "",
+              sl.stopped_medications?.length ? `stopped: ${sl.stopped_medications.join(", ")}` : "",
+            ].filter(Boolean);
+            return bits.length ? <p className="mt-2 border-t border-slate-200/70 pt-2 text-sm text-slate-600"><span className="font-medium text-slate-500">Since last visit:</span> {bits.join(" · ")}</p> : null;
+          })()}
+        </div>
+      )}
 
       <h2 className="mb-2 text-sm font-semibold text-slate-700">Visit history</h2>
       <div className="glass overflow-hidden rounded-2xl">
