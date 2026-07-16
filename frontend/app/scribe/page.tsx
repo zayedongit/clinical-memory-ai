@@ -10,6 +10,8 @@ type Soap = { subjective: string; objective: string; assessment: string; plan: s
 type Entities = { symptoms: string[]; medications: string[]; allergies: string[]; diagnoses: string[]; follow_up: string[] };
 type Turn = { speaker: "doctor" | "patient"; text: string };
 type FollowUp = { question: string; concern: string; likelihood_pct: number; severity: string };
+type RxItem = { brand: string; generic: string | null; strength: string | null; form: string | null; dose: string; frequency: string; duration: string; instructions: string; warning?: string };
+type DrugResult = { brand_name: string; generic_name: string | null; strength: string | null; dosage_form: string | null };
 type Patient = { id: string; name: string };
 type Summary = {
   visit_count: number; problems: string[]; medications: string[]; allergies: string[];
@@ -46,6 +48,7 @@ export default function ScribePage() {
   const [saved, setSaved] = useState<{ visit_id: string; patient_id: string } | null>(null);
   const [segments, setSegments] = useState(0);
   const [isFinal, setIsFinal] = useState(false);
+  const [rx, setRx] = useState<RxItem[]>([]);
   // longitudinal
   const [patientId, setPatientId] = useState<string | null>(null);
   const [patientName, setPatientName] = useState("");
@@ -123,7 +126,7 @@ export default function ScribePage() {
           <p className="mt-1 text-sm text-slate-500">The reviewed note is now in the patient&apos;s memory log.</p>
           <div className="mt-4 flex justify-center gap-3">
             <Link href={`/patients/${saved.patient_id}`} className="btn-primary">View patient record</Link>
-            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); }}
+            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); setRx([]); }}
               className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">New consultation</button>
           </div>
         </div>
@@ -248,12 +251,14 @@ export default function ScribePage() {
         </section>
       )}
 
+      {soap && <RxSection items={rx} setItems={setRx} summary={summary} />}
+
       {soap && <div className="flex justify-end"><button onClick={() => setShowSave(true)} className="btn-primary">Save visit</button></div>}
 
       {showSave && soap && (
         <SaveModal onClose={() => setShowSave(false)} onSaved={(res) => { setShowSave(false); setSaved(res); }}
           defaultPatient={patientId ? { id: patientId, name: patientName } : undefined}
-          payload={{ transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps }} />
+          payload={{ transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps, prescription: rx.map(({ warning, ...r }) => r) }} />
       )}
     </main>
   );
@@ -313,6 +318,82 @@ function AttachPatient({ onAttach }: { onAttach: (id: string) => void }) {
         </div>
       )}
     </div>
+  );
+}
+
+function RxSection({ items, setItems, summary }: { items: RxItem[]; setItems: (v: RxItem[]) => void; summary: Summary | null }) {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<DrugResult[]>([]);
+
+  useEffect(() => {
+    if (q.trim().length < 2) { setResults([]); return; }
+    const t = setTimeout(async () => {
+      const r = await apiGet(`/drugs?q=${encodeURIComponent(q.trim())}`);
+      if (r.ok) setResults((await r.json()).items || []);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  function checkSafety(generic: string | null): string | undefined {
+    if (!generic || !summary) return undefined;
+    const g = generic.toLowerCase();
+    const a = (summary.allergies || []).find((x) => g.includes(x.toLowerCase()) || x.toLowerCase().includes(g));
+    if (a) return `Possible allergy — patient allergic to ${a}`;
+    const m = (summary.medications || []).find((x) => g.includes(x.toLowerCase()) || x.toLowerCase().includes(g));
+    if (m) return `Already noted on ${m} (duplicate?)`;
+    return undefined;
+  }
+
+  function add(d: DrugResult) {
+    setItems([...items, { brand: d.brand_name, generic: d.generic_name, strength: d.strength, form: d.dosage_form, dose: "", frequency: "", duration: "", instructions: "", warning: checkSafety(d.generic_name) }]);
+    setQ(""); setResults([]);
+  }
+  const update = (i: number, patch: Partial<RxItem>) => setItems(items.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
+  const remove = (i: number) => setItems(items.filter((_, idx) => idx !== i));
+
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 text-sm font-semibold text-slate-700">Prescription</h2>
+      <div className="glass rounded-2xl p-4">
+        <div className="relative mb-3">
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search drug (brand or generic)…" className="field w-full" />
+          {results.length > 0 && (
+            <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
+              {results.map((d, i) => (
+                <button key={i} onClick={() => add(d)} className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50">
+                  <span className="font-medium text-slate-900">{d.brand_name}</span>
+                  <span className="text-xs text-slate-500"> — {[d.generic_name, d.strength, d.dosage_form].filter(Boolean).join(" · ")}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {items.length === 0 ? <p className="text-sm text-slate-400">No medications added.</p> : (
+          <ul className="space-y-3">
+            {items.map((it, i) => (
+              <li key={i} className="rounded-xl border border-slate-200 p-3">
+                <div className="mb-2 flex items-start justify-between">
+                  <div>
+                    <span className="text-sm font-medium text-slate-900">{it.brand}</span>
+                    <span className="text-xs text-slate-500"> {[it.generic, it.strength, it.form].filter(Boolean).join(" · ")}</span>
+                  </div>
+                  <button onClick={() => remove(i)} className="text-xs text-slate-400 hover:text-red-600">Remove</button>
+                </div>
+                {it.warning && <p className="mb-2 rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-700">⚠ {it.warning}</p>}
+                <div className="flex flex-wrap gap-2">
+                  <input placeholder="Dose (e.g. 500 mg)" value={it.dose} onChange={(e) => update(i, { dose: e.target.value })} className="field w-32" />
+                  <input placeholder="Frequency (e.g. BD)" value={it.frequency} onChange={(e) => update(i, { frequency: e.target.value })} className="field w-32" />
+                  <input placeholder="Duration (e.g. 5 days)" value={it.duration} onChange={(e) => update(i, { duration: e.target.value })} className="field w-36" />
+                  <input placeholder="Instructions" value={it.instructions} onChange={(e) => update(i, { instructions: e.target.value })} className="field min-w-[120px] flex-1" />
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        {summary && summary.visit_count > 0 && <p className="mt-2 text-[11px] text-slate-400">Safety checks run against this patient&apos;s recorded allergies &amp; medications.</p>}
+      </div>
+    </section>
   );
 }
 

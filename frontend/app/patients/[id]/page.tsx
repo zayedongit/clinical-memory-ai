@@ -12,6 +12,7 @@ type Note = {
   transcript: string | null; dialogue: { speaker: string; text: string }[];
   subjective: string; objective: string; assessment: string; plan: string;
   entities: Record<string, string[]>; follow_up_questions: { question: string; likelihood_pct: number; severity: string }[];
+  prescription?: { brand: string; generic: string | null; strength: string | null; form: string | null; dose: string; frequency: string; duration: string; instructions: string }[];
 };
 type VisitFull = { id: string; date: string | null; note: Note | null };
 type Summary = {
@@ -172,6 +173,20 @@ function VisitNote({ note }: { note: Note }) {
       <Field label="Objective" value={note.objective} />
       <Field label="Assessment" value={note.assessment} />
       <Field label="Plan" value={note.plan} />
+      {note.prescription && note.prescription.length > 0 && (
+        <div className="mb-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Prescription</p>
+          <ul className="mt-1 space-y-1">
+            {note.prescription.map((p, i) => (
+              <li key={i} className="text-slate-700">
+                <span className="font-medium">{p.brand}</span>
+                <span className="text-slate-500"> {[p.generic, p.strength, p.form].filter(Boolean).join(" · ")}</span>
+                <span className="text-slate-600"> — {[p.dose, p.frequency, p.duration].filter(Boolean).join(", ")}{p.instructions ? ` (${p.instructions})` : ""}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {note.follow_up_questions?.length > 0 && (
         <div className="mb-2">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Suggested follow-ups</p>

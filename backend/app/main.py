@@ -4,7 +4,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api.routers import clinics, conditions, health, match, me, patients, scribe, visits
+from .api.routers import clinics, conditions, drugs, health, match, me, patients, scribe, visits
 
 app = FastAPI(title="Clinical Memory AI API", version="0.1.0")
 
@@ -27,3 +27,4 @@ app.include_router(match.router)
 app.include_router(conditions.router)
 app.include_router(scribe.router)
 app.include_router(visits.router)
+app.include_router(drugs.router)
