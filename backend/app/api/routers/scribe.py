@@ -183,6 +183,7 @@ class SaveRequest(BaseModel):
     soap: dict | None = None
     entities: dict | None = None
     follow_up_questions: list | None = None
+    prescription: list | None = None
 
 
 @router.post("/save")
@@ -224,6 +225,7 @@ async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user))
         "subjective": so.get("subjective"), "objective": so.get("objective"),
         "assessment": so.get("assessment"), "plan": so.get("plan"),
         "entities": body.entities or {}, "follow_up_questions": body.follow_up_questions or [],
+        "prescription": body.prescription or [],
         "created_by": user.user_id,
     })
     if n.status_code not in (200, 201):

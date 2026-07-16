@@ -99,7 +99,7 @@ async def get_visit(visit_id: str, user: CurrentUser = Depends(get_current_user)
         params={"id": f"eq.{visit_id}", "limit": "1",
                 "select": "id,started_at,approved_at,status,patient_id,"
                           "soap_notes(transcript,dialogue,subjective,objective,assessment,plan,"
-                          "entities,follow_up_questions,created_at)"},
+                          "entities,follow_up_questions,prescription,created_at)"},
     )
     rows = r.json() if r.status_code == 200 else []
     if not rows:
