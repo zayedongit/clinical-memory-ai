@@ -10,6 +10,8 @@ type Soap = { subjective: string; objective: string; assessment: string; plan: s
 type Entities = { symptoms: string[]; medications: string[]; allergies: string[]; diagnoses: string[]; follow_up: string[] };
 type Turn = { speaker: "doctor" | "patient"; text: string };
 type FollowUp = { question: string; concern: string; likelihood_pct: number; severity: string };
+type RedFlag = { finding: string; concern: string; urgency: "emergency" | "urgent" | "routine"; action: string };
+type Considerations = { red_flags: RedFlag[]; missing_information: string[]; suggested_investigations: { test: string; rationale: string }[]; completeness_pct: number };
 type RxItem = { brand: string; generic: string | null; strength: string | null; form: string | null; dose: string; frequency: string; duration: string; instructions: string; warning?: string };
 type DrugResult = { brand_name: string; generic_name: string | null; strength: string | null; dosage_form: string | null };
 type Patient = { id: string; name: string };
@@ -42,6 +44,8 @@ export default function ScribePage() {
   const [soap, setSoap] = useState<Soap | null>(null);
   const [entities, setEntities] = useState<Entities | null>(null);
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
+  const [considerations, setConsiderations] = useState<Considerations | null>(null);
+  const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSave, setShowSave] = useState(false);
@@ -115,7 +119,8 @@ export default function ScribePage() {
     if (!r.ok) { setError(`Analysis failed (${r.status}). ${await r.text()}`); return; }
     const d = await r.json();
     setDialogue(d.dialogue || []); setSoap(d.soap); setEntities(d.entities);
-    setFollowUps(d.follow_up_questions || []); setIsFinal(mode === "final");
+    setFollowUps(d.follow_up_questions || []); setConsiderations(d.clinical_considerations || null);
+    setIsFinal(mode === "final");
   }
 
   if (saved) {
@@ -126,7 +131,7 @@ export default function ScribePage() {
           <p className="mt-1 text-sm text-slate-500">The reviewed note is now in the patient&apos;s memory log.</p>
           <div className="mt-4 flex justify-center gap-3">
             <Link href={`/patients/${saved.patient_id}`} className="btn-primary">View patient record</Link>
-            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); setRx([]); }}
+            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); setRx([]); setConsiderations(null); setConsent(false); }}
               className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">New consultation</button>
           </div>
         </div>
@@ -166,15 +171,27 @@ export default function ScribePage() {
       </div>
       {patientId && showHistory && summary && summary.visit_count > 0 && <HistoryPanel s={summary} />}
 
-      <div className="glass mb-6 flex items-center gap-4 rounded-2xl p-4">
-        {!recording
-          ? <button onClick={startRecording} disabled={!!busy} className="btn-primary">● Record</button>
-          : <button onClick={stopRecording} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white">■ Stop</button>}
-        <span className="text-xs text-slate-500">
-          {recording ? "Recording…" : busy ? busy
-            : segments > 0 ? `${segments} segment${segments > 1 ? "s" : ""} recorded — record more or analyse`
-            : "Keep each segment short (~30s) for now."}
-        </span>
+      <div className="glass mb-6 rounded-2xl p-4">
+        <label className="mb-3 flex items-start gap-2.5 rounded-xl bg-amber-50/70 p-3">
+          <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} disabled={recording || segments > 0}
+            className="mt-0.5 h-4 w-4 accent-amber-600" />
+          <span className="text-xs text-slate-700">
+            <span className="font-semibold text-amber-800">Recording consent.</span>{" "}
+            I confirm the patient has been informed and has given consent to record this
+            consultation for documentation. This is stored with the visit.
+          </span>
+        </label>
+        <div className="flex items-center gap-4">
+          {!recording
+            ? <button onClick={startRecording} disabled={!!busy || !consent} className="btn-primary disabled:opacity-40">● Record</button>
+            : <button onClick={stopRecording} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white">■ Stop</button>}
+          <span className="text-xs text-slate-500">
+            {recording ? "Recording…" : busy ? busy
+              : !consent && segments === 0 ? "Confirm consent to enable recording."
+              : segments > 0 ? `${segments} segment${segments > 1 ? "s" : ""} recorded — record more or analyse`
+              : "Keep each segment short (~30s) for now."}
+          </span>
+        </div>
       </div>
 
       {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
@@ -204,6 +221,8 @@ export default function ScribePage() {
           </div>
         </section>
       )}
+
+      {considerations && <ConsiderationsPanel c={considerations} />}
 
       {soap && (
         <section className="mb-6 space-y-4">
@@ -258,7 +277,10 @@ export default function ScribePage() {
       {showSave && soap && (
         <SaveModal onClose={() => setShowSave(false)} onSaved={(res) => { setShowSave(false); setSaved(res); }}
           defaultPatient={patientId ? { id: patientId, name: patientName } : undefined}
-          payload={{ transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps, prescription: rx.map(({ warning, ...r }) => r) }} />
+          redFlagCount={considerations?.red_flags.length ?? 0}
+          payload={{ transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps,
+            prescription: rx.map(({ warning, ...r }) => r), clinical_considerations: considerations ?? undefined,
+            consent_given: consent, consent_method: consent ? "verbal" : undefined }} />
       )}
     </main>
   );
@@ -269,6 +291,78 @@ function Line({ label, items, tone }: { label: string; items: string[]; tone?: s
     <div className="mb-1"><span className="text-xs font-medium text-slate-500">{label}: </span>
       {items.map((x, i) => <span key={i} className={`mr-1 inline-block rounded-full px-2 py-0.5 text-xs ${tone === "red" ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-600"}`}>{x}</span>)}
     </div>
+  );
+}
+
+const urgencyStyle: Record<string, { box: string; tag: string; label: string }> = {
+  emergency: { box: "border-red-300 bg-red-50", tag: "bg-red-600 text-white", label: "EMERGENCY" },
+  urgent: { box: "border-amber-300 bg-amber-50", tag: "bg-amber-500 text-white", label: "URGENT" },
+  routine: { box: "border-slate-200 bg-slate-50", tag: "bg-slate-400 text-white", label: "NOTE" },
+};
+
+function ConsiderationsPanel({ c }: { c: Considerations }) {
+  const hasAny = c.red_flags.length > 0 || c.missing_information.length > 0 || c.suggested_investigations.length > 0;
+  if (!hasAny && !c.completeness_pct) return null;
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
+        Clinical considerations
+        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-500">Physician review only — not a diagnosis</span>
+      </h2>
+
+      {c.red_flags.length > 0 && (
+        <div className="mb-3 space-y-2">
+          {c.red_flags.map((f, i) => {
+            const st = urgencyStyle[f.urgency] || urgencyStyle.routine;
+            return (
+              <div key={i} className={`rounded-xl border ${st.box} p-3`}>
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-sm font-semibold text-slate-900">⚠ {f.finding}</p>
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${st.tag}`}>{st.label}</span>
+                </div>
+                {f.concern && <p className="mt-1 text-xs text-slate-600">Possible concern: {f.concern}</p>}
+                {f.action && <p className="mt-1 text-xs font-medium text-slate-700">Consider: {f.action}</p>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="glass grid gap-4 rounded-2xl p-4 sm:grid-cols-2">
+        {c.suggested_investigations.length > 0 && (
+          <div>
+            <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">Investigations to consider</p>
+            <ul className="space-y-1">
+              {c.suggested_investigations.map((t, i) => (
+                <li key={i} className="text-sm text-slate-700">
+                  <span className="font-medium">{t.test}</span>
+                  {t.rationale && <span className="text-slate-500"> — {t.rationale}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {c.missing_information.length > 0 && (
+          <div>
+            <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">Missing information</p>
+            <ul className="list-disc pl-4 text-sm text-slate-600">
+              {c.missing_information.map((m, i) => <li key={i}>{m}</li>)}
+            </ul>
+          </div>
+        )}
+        {c.completeness_pct > 0 && (
+          <div className="sm:col-span-2">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Consultation completeness</span>
+              <span className="text-xs text-slate-500">{c.completeness_pct}%</span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
+              <div className={`h-full rounded-full ${c.completeness_pct >= 75 ? "bg-emerald-500" : c.completeness_pct >= 50 ? "bg-amber-500" : "bg-red-500"}`} style={{ width: `${c.completeness_pct}%` }} />
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -397,9 +491,9 @@ function RxSection({ items, setItems, summary }: { items: RxItem[]; setItems: (v
   );
 }
 
-function SaveModal({ onClose, onSaved, payload, defaultPatient }: {
+function SaveModal({ onClose, onSaved, payload, defaultPatient, redFlagCount }: {
   onClose: () => void; onSaved: (r: { visit_id: string; patient_id: string }) => void;
-  payload: Record<string, unknown>; defaultPatient?: { id: string; name: string };
+  payload: Record<string, unknown>; defaultPatient?: { id: string; name: string }; redFlagCount: number;
 }) {
   const [tab, setTab] = useState<"existing" | "new">("existing");
   const [patients, setPatients] = useState<Patient[]>([]);
@@ -407,13 +501,15 @@ function SaveModal({ onClose, onSaved, payload, defaultPatient }: {
   const [np, setNp] = useState({ name: "", age: "", gender: "", height_cm: "", weight_kg: "", phone: "" });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [attested, setAttested] = useState(false);
 
   useEffect(() => { apiGet("/patients").then(async (r) => { if (r.ok) setPatients((await r.json()).items || []); }); }, []);
   const filtered = useMemo(() => patients.filter((p) => p.name.toLowerCase().includes(q.toLowerCase())), [patients, q]);
 
   async function save(body: Record<string, unknown>) {
+    if (!attested) { setErr("Please confirm you have reviewed and approve this note."); return; }
     setBusy(true); setErr(null);
-    const r = await apiPost("/scribe/save", { ...payload, ...body }); setBusy(false);
+    const r = await apiPost("/scribe/save", { ...payload, ...body, attested: true }); setBusy(false);
     if (!r.ok) { setErr(`Save failed (${r.status}).`); return; }
     onSaved(await r.json());
   }
@@ -422,9 +518,25 @@ function SaveModal({ onClose, onSaved, payload, defaultPatient }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 px-4" onClick={onClose}>
       <div className="glass w-full max-w-md rounded-2xl p-6" onClick={(e) => e.stopPropagation()}>
         <h3 className="mb-3 text-base font-semibold text-slate-900">Save this visit</h3>
+
+        {redFlagCount > 0 && (
+          <p className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
+            ⚠ {redFlagCount} clinical red flag{redFlagCount > 1 ? "s" : ""} were raised for review. Please confirm you have considered them.
+          </p>
+        )}
+
+        <label className="mb-4 flex items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+          <input type="checkbox" checked={attested} onChange={(e) => setAttested(e.target.checked)} className="mt-0.5 h-4 w-4 accent-blue-600" />
+          <span className="text-xs text-slate-700">
+            <span className="font-semibold text-slate-900">Physician attestation.</span>{" "}
+            I have reviewed this AI-assisted note and its considerations, corrected them as needed,
+            and approve this record as clinically accurate. I remain the responsible clinician.
+          </span>
+        </label>
+
         {defaultPatient && (
-          <button disabled={busy} onClick={() => save({ patient_id: defaultPatient.id })}
-            className="btn-primary mb-3 w-full">Save to {defaultPatient.name}</button>
+          <button disabled={busy || !attested} onClick={() => save({ patient_id: defaultPatient.id })}
+            className="btn-primary mb-3 w-full disabled:opacity-40">Save to {defaultPatient.name}</button>
         )}
         <div className="mb-4 flex gap-2">
           <button onClick={() => setTab("existing")} className={`flex-1 rounded-lg px-3 py-2 text-sm ${tab === "existing" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600"}`}>Another existing</button>
@@ -435,7 +547,7 @@ function SaveModal({ onClose, onSaved, payload, defaultPatient }: {
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search patients…" className="field mb-2 w-full" />
             <div className="max-h-56 overflow-y-auto rounded-lg border border-slate-200">
               {filtered.length === 0 ? <p className="p-3 text-sm text-slate-400">No patients.</p> :
-                filtered.map((p) => <button key={p.id} disabled={busy} onClick={() => save({ patient_id: p.id })} className="block w-full px-3 py-2.5 text-left text-sm text-slate-800 hover:bg-slate-50">{p.name}</button>)}
+                filtered.map((p) => <button key={p.id} disabled={busy || !attested} onClick={() => save({ patient_id: p.id })} className="block w-full px-3 py-2.5 text-left text-sm text-slate-800 hover:bg-slate-50 disabled:opacity-40">{p.name}</button>)}
             </div>
           </div>
         ) : (
@@ -452,10 +564,10 @@ function SaveModal({ onClose, onSaved, payload, defaultPatient }: {
               <input placeholder="Weight (kg)" inputMode="numeric" value={np.weight_kg} onChange={(e) => setNp({ ...np, weight_kg: e.target.value })} className="field w-1/2" />
             </div>
             <input placeholder="Phone" value={np.phone} onChange={(e) => setNp({ ...np, phone: e.target.value })} className="field w-full" />
-            <button disabled={busy || !np.name.trim()} onClick={() => save({
+            <button disabled={busy || !np.name.trim() || !attested} onClick={() => save({
               new_patient: { name: np.name, gender: np.gender || null, phone: np.phone || null,
                 age: np.age ? parseInt(np.age) : null, height_cm: np.height_cm ? parseFloat(np.height_cm) : null, weight_kg: np.weight_kg ? parseFloat(np.weight_kg) : null },
-            })} className="btn-primary w-full">{busy ? "Saving…" : "Create patient & save visit"}</button>
+            })} className="btn-primary w-full disabled:opacity-40">{busy ? "Saving…" : "Create patient & save visit"}</button>
           </div>
         )}
         {err && <p className="mt-2 text-sm text-red-600">{err}</p>}

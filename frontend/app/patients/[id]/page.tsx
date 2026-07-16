@@ -8,13 +8,16 @@ import { apiDelete, apiGet } from "../../../lib/api";
 
 type Patient = { id: string; name: string; gender: string | null; phone: string | null; dob: string | null; height_cm: number | null; weight_kg: number | null };
 type VisitRow = { id: string; date: string | null; status: string; summary: string };
+type RedFlag = { finding: string; concern: string; urgency: string; action: string };
+type Considerations = { red_flags?: RedFlag[]; missing_information?: string[]; suggested_investigations?: { test: string; rationale: string }[]; completeness_pct?: number };
 type Note = {
   transcript: string | null; dialogue: { speaker: string; text: string }[];
   subjective: string; objective: string; assessment: string; plan: string;
   entities: Record<string, string[]>; follow_up_questions: { question: string; likelihood_pct: number; severity: string }[];
   prescription?: { brand: string; generic: string | null; strength: string | null; form: string | null; dose: string; frequency: string; duration: string; instructions: string }[];
+  clinical_considerations?: Considerations; attested?: boolean;
 };
-type VisitFull = { id: string; date: string | null; note: Note | null };
+type VisitFull = { id: string; date: string | null; note: Note | null; consent_given?: boolean; consent_method?: string | null };
 type Summary = {
   visit_count: number; problems: string[]; medications: string[]; allergies: string[];
   recurring_symptoms: { term: string; count: number }[];
@@ -144,7 +147,7 @@ export default function PatientDetail({ params }: { params: Promise<{ id: string
 
                 {open === v.id && (
                   <div className="border-t border-slate-200/70 bg-slate-50/50 px-5 py-4 text-sm">
-                    {!full[v.id]?.note ? <p className="text-slate-400">Loading…</p> : <VisitNote note={full[v.id].note!} />}
+                    {!full[v.id]?.note ? <p className="text-slate-400">Loading…</p> : <VisitNote note={full[v.id].note!} visit={full[v.id]} />}
                   </div>
                 )}
               </li>
@@ -166,9 +169,27 @@ function Field({ label, value }: { label: string; value: string }) {
   );
 }
 
-function VisitNote({ note }: { note: Note }) {
+const urgencyTag: Record<string, string> = { emergency: "bg-red-600 text-white", urgent: "bg-amber-500 text-white", routine: "bg-slate-400 text-white" };
+
+function VisitNote({ note, visit }: { note: Note; visit?: VisitFull }) {
+  const cc = note.clinical_considerations || {};
+  const redFlags = cc.red_flags || [];
   return (
     <div>
+      {redFlags.length > 0 && (
+        <div className="mb-3 space-y-1.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Red flags raised <span className="font-normal normal-case text-slate-400">(reviewed by physician)</span></p>
+          {redFlags.map((f, i) => (
+            <div key={i} className="rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-sm font-medium text-slate-800">⚠ {f.finding}</span>
+                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${urgencyTag[f.urgency] || urgencyTag.routine}`}>{f.urgency}</span>
+              </div>
+              {f.concern && <p className="mt-0.5 text-xs text-slate-600">{f.concern}</p>}
+            </div>
+          ))}
+        </div>
+      )}
       <Field label="Subjective" value={note.subjective} />
       <Field label="Objective" value={note.objective} />
       <Field label="Assessment" value={note.assessment} />
@@ -196,6 +217,10 @@ function VisitNote({ note }: { note: Note }) {
         </div>
       )}
       {note.transcript && <details className="mt-2"><summary className="cursor-pointer text-xs text-slate-400">Transcript</summary><p className="mt-1 whitespace-pre-wrap text-xs text-slate-500">{note.transcript}</p></details>}
+      <div className="mt-3 flex flex-wrap gap-2 border-t border-slate-200/70 pt-2 text-[11px]">
+        {note.attested && <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-medium text-emerald-700">✓ Physician-attested</span>}
+        {visit?.consent_given && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-500">Recording consent: {visit.consent_method || "given"}</span>}
+      </div>
     </div>
   );
 }
