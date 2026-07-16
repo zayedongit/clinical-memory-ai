@@ -98,8 +98,10 @@ async def get_visit(visit_id: str, user: CurrentUser = Depends(get_current_user)
         "GET", "visits", headers=user_headers(user.token),
         params={"id": f"eq.{visit_id}", "limit": "1",
                 "select": "id,started_at,approved_at,status,patient_id,"
+                          "consent_given,consent_at,consent_method,"
                           "soap_notes(transcript,dialogue,subjective,objective,assessment,plan,"
-                          "entities,follow_up_questions,prescription,created_at)"},
+                          "entities,follow_up_questions,prescription,clinical_considerations,"
+                          "attested,attested_at,created_at)"},
     )
     rows = r.json() if r.status_code == 200 else []
     if not rows:
@@ -111,6 +113,8 @@ async def get_visit(visit_id: str, user: CurrentUser = Depends(get_current_user)
         "date": v.get("approved_at") or v.get("started_at"),
         "status": v.get("status"),
         "patient_id": v.get("patient_id"),
+        "consent_given": v.get("consent_given"),
+        "consent_method": v.get("consent_method"),
         "note": notes[0] if notes else None,
     }
 
