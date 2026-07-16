@@ -10,6 +10,7 @@ Everything AI produces is a draft the physician reviews before saving.
 """
 import asyncio
 import json
+import re
 from datetime import date, datetime, timezone
 
 import httpx
@@ -263,6 +264,7 @@ async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user))
 
     so = data.get("soap") or {}
     ent = data.get("entities") or {}
+    entities = {k: ent.get(k, []) for k in ("symptoms", "medications", "allergies", "diagnoses", "follow_up")}
     fups = [] if body.mode == "final" else [
         {
             "question": q.get("question", ""),
@@ -272,16 +274,49 @@ async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user))
         }
         for q in (data.get("follow_up_questions") or []) if isinstance(q, dict) and q.get("question")
     ]
+
+    considerations = _considerations(data.get("clinical_considerations"))
+    # Ground the safety-critical red flags in the curated KB, then merge.
+    grounded = await kb_ground_red_flags(entities.get("symptoms") or [], user.token)
+    considerations = _merge_considerations(considerations, grounded)
+    # De-duplicate follow-ups against the (merged) red flags and sort by severity.
+    fups = _dedupe_followups(fups, considerations["red_flags"])
+
     return {
         "dialogue": [d for d in (data.get("dialogue") or []) if isinstance(d, dict) and d.get("text")],
         "soap": {k: so.get(k, "") for k in ("subjective", "objective", "assessment", "plan")},
-        "entities": {k: ent.get(k, []) for k in ("symptoms", "medications", "allergies", "diagnoses", "follow_up")},
+        "entities": entities,
         "follow_up_questions": fups,
-        "clinical_considerations": _considerations(data.get("clinical_considerations")),
+        "clinical_considerations": considerations,
     }
 
 
 _URGENCY = {"emergency", "urgent", "routine"}
+_URG_RANK = {"emergency": 0, "urgent": 1, "routine": 2}
+_SEV_RANK = {"high": 0, "moderate": 1, "low": 2}
+_STOP = {"about", "ask", "for", "the", "and", "any", "check", "assess", "with", "your",
+         "patient", "possible", "consider", "rule", "out", "screen", "signs", "symptoms",
+         "history", "this", "that", "from", "have", "been", "such", "other"}
+
+
+def _rf_order(x: dict) -> tuple:
+    # KB-grounded first within same urgency (curated = more trustworthy), then AI.
+    return (_URG_RANK.get(x.get("urgency"), 3), 0 if x.get("source") == "kb" else 1)
+
+
+def _kw(text: str) -> set[str]:
+    """Significant word tokens for cheap overlap-based de-duplication."""
+    return {w for w in re.findall(r"[a-z]+", (text or "").lower()) if len(w) > 3 and w not in _STOP}
+
+
+def _grounded_urgency(acuity: str | None, cant_miss: bool) -> str:
+    """Loud for genuine can't-miss, quiet otherwise — controls alarm fatigue."""
+    a = (acuity or "").lower()
+    if cant_miss and any(k in a for k in ("emerg", "critical", "life")):
+        return "emergency"
+    if cant_miss:
+        return "urgent"
+    return "routine"  # red-flag-bearing but not flagged can't-miss → gentle note
 
 
 def _considerations(c: object) -> dict:
@@ -297,10 +332,9 @@ def _considerations(c: object) -> dict:
             "concern": str(f.get("concern", "")).strip(),
             "urgency": u if u in _URGENCY else "routine",
             "action": str(f.get("action", "")).strip(),
+            "source": "ai",
         })
-    # emergency first, then urgent, then routine
-    order = {"emergency": 0, "urgent": 1, "routine": 2}
-    red_flags.sort(key=lambda x: order.get(x["urgency"], 3))
+    red_flags.sort(key=_rf_order)
     investigations = [
         {"test": str(i.get("test", "")).strip(), "rationale": str(i.get("rationale", "")).strip()}
         for i in (c.get("suggested_investigations") or [])
@@ -317,6 +351,120 @@ def _considerations(c: object) -> dict:
         "suggested_investigations": investigations,
         "completeness_pct": pct,
     }
+
+
+# --------------------------------------------------------------------- #
+# KB grounding: curated red flags from the ICMR-derived knowledge base
+# --------------------------------------------------------------------- #
+_ABBREV = {
+    "sob": "breathlessness", "shortness of breath": "breathlessness",
+    "short of breath": "breathlessness", "cp": "chest pain",
+    "loc": "loss of consciousness", "abd pain": "abdominal pain",
+}
+
+
+def _norm_symptom(s: str) -> str:
+    t = re.sub(r"\b(mild|severe|acute|chronic|slight|a lot of|some|very|feeling|feel)\b", "", s.lower())
+    t = t.strip(" .,-")
+    return _ABBREV.get(t, t)
+
+
+async def kb_ground_red_flags(symptoms: list[str], token: str) -> list[dict]:
+    """Ask the KB which CAN'T-MISS conditions these symptoms point at, and
+    surface each one's curated red-flag features as a grounded red flag."""
+    findings = sorted({_norm_symptom(s) for s in symptoms if len(_norm_symptom(s)) >= 3})
+    if not findings:
+        return []
+    try:
+        resp = await rest("POST", "rpc/kb_ground_red_flags",
+                          headers=user_headers(token), json={"findings": findings})
+    except httpx.HTTPError:
+        return []
+    if resp.status_code != 200:
+        return []
+    rows = resp.json() or []
+
+    by_cond: dict[str, dict] = {}
+    for r in rows:
+        cid = r.get("condition_id")
+        if not cid:
+            continue
+        c = by_cond.setdefault(cid, {
+            "name": r.get("condition_name", ""),
+            "acuity": r.get("acuity"),
+            "prevalence": r.get("prevalence_tier"),
+            "cant_miss": bool(r.get("any_cantmiss")),
+            "matched": r.get("matched_count") or 0,
+            "score": float(r.get("score") or 0),
+            "features": [], "actions": [],
+        })
+        lbl = (r.get("redflag_label") or "").strip()
+        if lbl and lbl.lower() not in {x.lower() for x in c["features"]}:
+            c["features"].append(lbl)
+        act = (r.get("action") or "").strip()
+        if act and act.lower() not in {x.lower() for x in c["actions"]}:
+            c["actions"].append(act)
+
+    grounded: list[dict] = []
+    # can't-miss first, then by term-specificity score (v3), then match breadth
+    ranked = sorted(by_cond.items(),
+                    key=lambda kv: (not kv[1]["cant_miss"], -kv[1]["score"], -kv[1]["matched"]))
+    for cid, c in ranked[:4]:
+        feats = ", ".join(c["features"][:5])
+        action = "; ".join(c["actions"][:2]) if c["actions"] else ""
+        if feats:
+            action = (f"Screen for: {feats}." + (f" {action}" if action else "")).strip()
+        concern = ("Can't-miss condition matched to the presenting symptoms (ICMR KB)."
+                   if c["cant_miss"] else
+                   "Condition with red-flag features matched to the symptoms (ICMR KB).")
+        grounded.append({
+            "finding": f"Rule out {c['name']}",
+            "concern": concern,
+            "urgency": _grounded_urgency(c["acuity"], c["cant_miss"]),
+            "action": action or f"Consider features of {c['name']}.",
+            "source": "kb",
+        })
+    return grounded
+
+
+_NAME_GENERIC = {"acute", "chronic", "syndrome", "disease", "disorder", "infection",
+                 "primary", "secondary", "possible", "suspected"}
+
+
+def _merge_considerations(cc: dict, grounded: list[dict]) -> dict:
+    """Put curated KB red flags first, then AI red flags that add something new."""
+    if not grounded:
+        return cc
+    # Specific condition-name tokens from the KB flags (e.g. "meningitis",
+    # "coronary") — a single shared one signals the AI flag is the same concern.
+    kb_name_kw = set()
+    for g in grounded:
+        name = re.sub(r"^\s*rule out\s+", "", g["finding"], flags=re.IGNORECASE)
+        kb_name_kw |= (_kw(name) - _NAME_GENERIC)
+    ai_kept = []
+    for rf in cc.get("red_flags", []):
+        ai_kw = _kw(rf["finding"]) | _kw(rf["concern"])
+        if ai_kw & kb_name_kw:      # same underlying condition already covered by KB
+            continue
+        ai_kept.append(rf)
+    merged = grounded + ai_kept
+    merged.sort(key=_rf_order)
+    cc["red_flags"] = merged
+    return cc
+
+
+def _dedupe_followups(fups: list[dict], red_flags: list[dict]) -> list[dict]:
+    """Remove follow-ups that just restate a red flag, then sort by severity."""
+    rf_kw = [(_kw(rf["finding"]) | _kw(rf["action"])) for rf in red_flags]
+    kept = []
+    for q in fups:
+        qk = _kw(q.get("question", "")) | _kw(q.get("concern", ""))
+        if any(len(qk & k) >= 2 for k in rf_kw):
+            continue
+        kept.append(q)
+    kept.sort(key=lambda q: (_SEV_RANK.get(str(q.get("severity", "low")).lower(), 3),
+                             -int(q.get("likelihood_pct") or 0)))
+    return kept
 
 
 # --------------------------------------------------------------------- #

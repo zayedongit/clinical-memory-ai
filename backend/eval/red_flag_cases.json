@@ -1,0 +1,22 @@
+{
+  "description": "Red-flag presentations the Considerations Engine should surface via KB grounding. Each case lists presenting symptoms and the can't-miss conditions we expect the KB to point at. 'expect_any' matches (case-insensitively) against returned condition names OR red-flag feature labels; a case passes if ANY listed term is found. This measures the recall of the curated KB grounding — misses are genuine coverage gaps worth closing.",
+  "cases": [
+    {"name": "Cardiac chest pain", "symptoms": ["chest pain", "sweating", "breathlessness"], "expect_any": ["coronary", "angina", "myocardial", "infarction", "acs", "cardiac"]},
+    {"name": "Meningitis", "symptoms": ["severe headache", "neck stiffness", "fever"], "expect_any": ["meningitis", "meningeal"]},
+    {"name": "Subarachnoid haemorrhage", "symptoms": ["sudden severe headache", "worst headache", "vomiting"], "expect_any": ["subarachnoid", "haemorrhage", "hemorrhage", "intracranial", "stroke"]},
+    {"name": "Pulmonary embolism / DVT", "symptoms": ["breathlessness", "chest pain", "leg swelling"], "expect_any": ["embolism", "pulmonary embolism", "thrombosis", "dvt", "pe"]},
+    {"name": "Appendicitis / acute abdomen", "symptoms": ["abdominal pain", "vomiting", "fever"], "expect_any": ["appendicitis", "peritonitis", "acute abdomen", "obstruction"]},
+    {"name": "Upper GI bleed", "symptoms": ["black stools", "vomiting blood", "dizziness"], "expect_any": ["bleed", "haemorrhage", "hemorrhage", "melaena", "melena", "ulcer", "varice"]},
+    {"name": "Stroke", "symptoms": ["facial droop", "weakness one side", "slurred speech"], "expect_any": ["stroke", "cerebrovascular", "ischaemic", "ischemic", "tia"]},
+    {"name": "Ectopic pregnancy", "symptoms": ["lower abdominal pain", "vaginal bleeding", "missed period"], "expect_any": ["ectopic", "pregnancy"]},
+    {"name": "Diabetic ketoacidosis", "symptoms": ["excessive thirst", "vomiting", "rapid breathing", "abdominal pain"], "expect_any": ["ketoacidosis", "dka", "hyperglyc"]},
+    {"name": "Sepsis / severe infection", "symptoms": ["high fever", "confusion", "fast heart rate", "low blood pressure"], "expect_any": ["sepsis", "septic", "shock"]},
+    {"name": "Asthma exacerbation", "symptoms": ["breathlessness", "wheeze", "unable to speak full sentences"], "expect_any": ["asthma", "bronchospasm", "respiratory failure"]},
+    {"name": "Tuberculosis (chronic red flag)", "symptoms": ["cough", "weight loss", "night sweats", "blood in sputum"], "expect_any": ["tuberculosis", "tb", "malignancy", "carcinoma", "cancer"]}
+  ],
+  "negative_cases": [
+    {"name": "Common cold", "symptoms": ["runny nose", "sneezing", "mild sore throat", "mild cough"], "forbid_any": ["myocardial", "coronary", "meningitis", "subarachnoid", "embolism", "sepsis", "ketoacidosis", "stroke", "malignancy", "carcinoma"]},
+    {"name": "Tension headache", "symptoms": ["mild headache", "stress", "tiredness"], "forbid_any": ["subarachnoid", "meningitis", "intracranial", "stroke", "haemorrhage", "hemorrhage"]},
+    {"name": "Minor ankle sprain", "symptoms": ["ankle pain", "mild swelling after twist"], "forbid_any": ["embolism", "thrombosis", "fracture", "sepsis"]}
+  ]
+}
