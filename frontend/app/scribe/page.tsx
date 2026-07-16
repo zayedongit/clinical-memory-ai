@@ -10,7 +10,7 @@ type Soap = { subjective: string; objective: string; assessment: string; plan: s
 type Entities = { symptoms: string[]; medications: string[]; allergies: string[]; diagnoses: string[]; follow_up: string[] };
 type Turn = { speaker: "doctor" | "patient"; text: string };
 type FollowUp = { question: string; concern: string; likelihood_pct: number; severity: string };
-type RedFlag = { finding: string; concern: string; urgency: "emergency" | "urgent" | "routine"; action: string };
+type RedFlag = { finding: string; concern: string; urgency: "emergency" | "urgent" | "routine"; action: string; source?: string };
 type Considerations = { red_flags: RedFlag[]; missing_information: string[]; suggested_investigations: { test: string; rationale: string }[]; completeness_pct: number };
 type RxItem = { brand: string; generic: string | null; strength: string | null; form: string | null; dose: string; frequency: string; duration: string; instructions: string; warning?: string };
 type DrugResult = { brand_name: string; generic_name: string | null; strength: string | null; dosage_form: string | null };
@@ -129,8 +129,9 @@ export default function ScribePage() {
         <div className="glass rounded-2xl p-8 text-center">
           <p className="text-lg font-semibold text-slate-900">Visit saved ✓</p>
           <p className="mt-1 text-sm text-slate-500">The reviewed note is now in the patient&apos;s memory log.</p>
-          <div className="mt-4 flex justify-center gap-3">
-            <Link href={`/patients/${saved.patient_id}`} className="btn-primary">View patient record</Link>
+          <div className="mt-4 flex flex-wrap justify-center gap-3">
+            <Link href={`/visits/${saved.visit_id}/print`} className="btn-primary">Print / Export PDF</Link>
+            <Link href={`/patients/${saved.patient_id}`} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">View patient record</Link>
             <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); setRx([]); setConsiderations(null); setConsent(false); }}
               className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">New consultation</button>
           </div>
@@ -318,7 +319,10 @@ function ConsiderationsPanel({ c }: { c: Considerations }) {
               <div key={i} className={`rounded-xl border ${st.box} p-3`}>
                 <div className="flex items-start justify-between gap-3">
                   <p className="text-sm font-semibold text-slate-900">⚠ {f.finding}</p>
-                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${st.tag}`}>{st.label}</span>
+                  <span className="flex shrink-0 items-center gap-1">
+                    {f.source === "kb" && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-indigo-700" title="Grounded in the ICMR-derived knowledge base">ICMR KB</span>}
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${st.tag}`}>{st.label}</span>
+                  </span>
                 </div>
                 {f.concern && <p className="mt-1 text-xs text-slate-600">Possible concern: {f.concern}</p>}
                 {f.action && <p className="mt-1 text-xs font-medium text-slate-700">Consider: {f.action}</p>}

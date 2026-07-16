@@ -8,7 +8,7 @@ import { apiDelete, apiGet } from "../../../lib/api";
 
 type Patient = { id: string; name: string; gender: string | null; phone: string | null; dob: string | null; height_cm: number | null; weight_kg: number | null };
 type VisitRow = { id: string; date: string | null; status: string; summary: string };
-type RedFlag = { finding: string; concern: string; urgency: string; action: string };
+type RedFlag = { finding: string; concern: string; urgency: string; action: string; source?: string };
 type Considerations = { red_flags?: RedFlag[]; missing_information?: string[]; suggested_investigations?: { test: string; rationale: string }[]; completeness_pct?: number };
 type Note = {
   transcript: string | null; dialogue: { speaker: string; text: string }[];
@@ -147,6 +147,9 @@ export default function PatientDetail({ params }: { params: Promise<{ id: string
 
                 {open === v.id && (
                   <div className="border-t border-slate-200/70 bg-slate-50/50 px-5 py-4 text-sm">
+                    <div className="mb-3 flex justify-end">
+                      <Link href={`/visits/${v.id}/print`} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50">Print / Export PDF</Link>
+                    </div>
                     {!full[v.id]?.note ? <p className="text-slate-400">Loading…</p> : <VisitNote note={full[v.id].note!} visit={full[v.id]} />}
                   </div>
                 )}
@@ -183,7 +186,10 @@ function VisitNote({ note, visit }: { note: Note; visit?: VisitFull }) {
             <div key={i} className="rounded-lg border border-red-200 bg-red-50 px-3 py-2">
               <div className="flex items-start justify-between gap-2">
                 <span className="text-sm font-medium text-slate-800">⚠ {f.finding}</span>
-                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${urgencyTag[f.urgency] || urgencyTag.routine}`}>{f.urgency}</span>
+                <span className="flex shrink-0 items-center gap-1">
+                  {f.source === "kb" && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-indigo-700">ICMR KB</span>}
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${urgencyTag[f.urgency] || urgencyTag.routine}`}>{f.urgency}</span>
+                </span>
               </div>
               {f.concern && <p className="mt-0.5 text-xs text-slate-600">{f.concern}</p>}
             </div>
