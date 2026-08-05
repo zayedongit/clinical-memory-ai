@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🩺 Clinical Memory AI
+# Clinical Memory AI
 
-**A web-first clinical documentation & decision-support platform for physicians and small clinics.**
+**A web-first clinical documentation and decision-support platform for physicians and small clinics.**
 
 Turn a spoken consultation into a structured, medico-legally-shaped note — with longitudinal
 patient memory and guideline-grounded clinical decision support. The physician stays in control
@@ -17,33 +17,33 @@ at every step.
 
 </div>
 
-> ⚕️ **Not an autonomous diagnosis or prescription system.** Every AI output is a draft the
-> physician reviews, edits, and explicitly attests before it becomes part of the record.
+> **Not an autonomous diagnosis or prescription system.** Every AI output is a draft the physician
+> reviews, edits, and explicitly attests before it becomes part of the record.
 
 ---
 
-## ✨ What it does
+## What it does
 
-- **🎙️ AI Scribe** — records the consultation (multilingual, incl. Hindi/English code-mixing),
+- **AI Scribe** — records the consultation (multilingual, including Hindi/English code-mixing),
   transcribes it, and **auto-populates a structured encounter** (chief complaints, history,
   vitals, examination).
-- **🧭 Consultation wizard** — a clean 3-step flow (**Consultation → Prescription → Review & Sign**)
+- **Consultation wizard** — a clean 3-step flow (**Consultation → Prescription → Review & Sign**)
   with a persistent patient banner, draft/resume, and physician attestation.
-- **🧠 Longitudinal memory** — every visit is stored per patient with history-aware notes and
+- **Longitudinal memory** — every visit is stored per patient with history-aware notes and
   cross-visit trends.
-- **🔬 Clinical decision support** — ranked **differential diagnosis with ICD-10 codes**,
-  investigations (with urgency), and evidence-based treatment with local drug **brands + prices** —
+- **Clinical decision support** — ranked **differential diagnosis with ICD-10 codes**,
+  investigations (with urgency), and evidence-based treatment with local drug **brands and prices** —
   guideline-grounded and physician-review-only.
-- **💊 Real formulary** — search a **100k-item hospital catalogue** (brands, strengths, MRP,
-  therapeutic class) with allergy/duplicate safety checks against the patient's own record.
-- **🔒 Safety & trust by design** — recording consent, enforced physician attestation, an audit
+- **Real formulary** — search a **100k-item hospital catalogue** (brands, strengths, MRP,
+  therapeutic class) with allergy and duplicate-therapy checks against the patient's own record.
+- **Safety and trust by design** — recording consent, enforced physician attestation, an audit
   trail, and a printable prescription / visit record.
 
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 flowchart LR
-  Dr([👩‍⚕️ Physician]) --> FE[Next.js App<br/>App Router · TS · Tailwind]
+  Dr([Physician]) --> FE[Next.js App<br/>App Router · TS · Tailwind]
   FE -->|Supabase JWT| BE[FastAPI Backend<br/>Python 3.12]
   FE --> AUTH[(Supabase Auth)]
   BE --> DB[(Supabase Postgres<br/>Row-Level Security)]
@@ -55,7 +55,7 @@ flowchart LR
 Multi-tenant by design: **every clinical table is clinic-scoped via Postgres Row-Level Security**,
 enforced by passing the user's JWT through to PostgREST.
 
-## 🔄 The consultation flow
+## The consultation flow
 
 ```mermaid
 flowchart LR
@@ -67,21 +67,21 @@ flowchart LR
   F --> G[Saved record<br/>+ PDF]
 ```
 
-## 🧪 Engineering highlights
+## Engineering highlights
 
 - **Measured clinical quality, not vibes** — a red-flag **evaluation harness** scores the
-  decision support against classic can't-miss presentations and reports recall + a
+  decision support against classic can't-miss presentations and reports recall plus a
   no-false-alarm (precision) metric, runnable in CI without an LLM.
 - **Multi-tenant isolation** — Row-Level Security with an isolation proof in the schema tests.
-- **Safety-by-design** — consent capture, server-enforced physician attestation, and an
+- **Safety by design** — consent capture, server-enforced physician attestation, and an
   append-only audit log.
-- **Resilient AI pipeline** — provider fallback for speech-to-text, model fallback + JSON
+- **Resilient AI pipeline** — provider fallback for speech-to-text, model fallback and JSON
   repair for structuring, and fail-open decision support so a partial encounter never hard-fails.
 - **Real-world data** — ingestion of a 100k-item hospital formulary and an ICMR-derived
   knowledge base for grounding.
 - **CI** — lint, typecheck, and build on every push.
 
-## 🧰 Tech stack
+## Tech stack
 
 | Layer | Technology |
 |---|---|
@@ -93,12 +93,11 @@ flowchart LR
 | Decision support | External Clinical Synthesis API (guideline-grounded) |
 | Deploy | Cloudflare (OpenNext) · containerized backend |
 
-## 📸 Screenshots
+## Screenshots
 
-> Add screenshots to `docs/screenshots/` and reference them here, e.g.:
-> `![Consultation wizard](docs/screenshots/consult.png)`
+_Coming soon._
 
-## 🚀 Getting started
+## Getting started
 
 ```bash
 # backend
@@ -118,9 +117,9 @@ supabase db push
 ```
 
 Configuration lives in `backend/.env` (git-ignored). See `backend/.env.example` for the full
-list. **Never commit real keys**; the frontend uses only the public Supabase anon key.
+list. Never commit real keys; the frontend uses only the public Supabase anon key.
 
-## 📁 Project structure
+## Project structure
 
 ```
 clinical-memory-ai/
@@ -133,12 +132,13 @@ clinical-memory-ai/
 └── docs/
 ```
 
-## ⚕️ Status & disclaimer
+## Status and disclaimer
 
 Active development — a working prototype, **not a certified medical device**. AI output is
 decision *support* for a licensed physician, who remains the responsible clinician.
 
-## 📜 License
+## License
 
-© Clinical Memory AI. All rights reserved. This source is public for viewing and reference only;
-it is not licensed for reuse, redistribution, or commercial use without written permission.
+Copyright Clinical Memory AI. All rights reserved. This source is public for viewing and
+reference only; it is not licensed for reuse, redistribution, or commercial use without written
+permission.
