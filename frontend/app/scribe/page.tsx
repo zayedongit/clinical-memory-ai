@@ -12,8 +12,13 @@ type Turn = { speaker: "doctor" | "patient"; text: string };
 type FollowUp = { question: string; concern: string; likelihood_pct: number; severity: string };
 type RedFlag = { finding: string; concern: string; urgency: "emergency" | "urgent" | "routine"; action: string; source?: string };
 type Considerations = { red_flags: RedFlag[]; missing_information: string[]; suggested_investigations: { test: string; rationale: string }[]; completeness_pct: number };
+type Ddx = { diagnosis: string; likelihood: string; reasoning: string; icd10: string };
+type Investigation = { investigation: string; urgency: string; rationale: string; mnm_floor: boolean };
+type TxDrug = { drug: string; dose: string; route: string; frequency: string; duration: string; brands: string[]; dose_needs_doctor: boolean; dose_flag: string };
+type Treatment = { diagnosis: string; first_line: TxDrug[]; non_pharmacological: string[] };
+type DecisionSupport = { available: boolean; differential_diagnosis: Ddx[]; must_not_miss: { diagnosis: string }[]; investigations: Investigation[]; treatment: Treatment[]; confirmed: boolean; sources?: { book: string; page: number; snippet: string }[] };
 type RxItem = { brand: string; generic: string | null; strength: string | null; form: string | null; dose: string; frequency: string; duration: string; instructions: string; warning?: string };
-type DrugResult = { brand_name: string; generic_name: string | null; strength: string | null; dosage_form: string | null };
+type DrugResult = { brand_name: string; generic_name: string | null; strength: string | null; form: string | null; mrp?: number | string | null; drug_class?: string | null };
 type Patient = { id: string; name: string };
 type Summary = {
   visit_count: number; problems: string[]; medications: string[]; allergies: string[];
@@ -56,8 +61,12 @@ export default function ScribePage() {
   // longitudinal
   const [patientId, setPatientId] = useState<string | null>(null);
   const [patientName, setPatientName] = useState("");
+  const [patientMeta, setPatientMeta] = useState<{ age?: string; gender?: string; weight?: string }>({});
   const [summary, setSummary] = useState<Summary | null>(null);
   const [showHistory, setShowHistory] = useState(true);
+  // Clinical Synthesis clinical decision support
+  const [ds, setDs] = useState<DecisionSupport | null>(null);
+  const [dsBusy, setDsBusy] = useState<string | null>(null);
 
   const ctxRef = useRef<AudioContext | null>(null);
   const procRef = useRef<ScriptProcessorNode | null>(null);
@@ -68,8 +77,49 @@ export default function ScribePage() {
 
   async function attach(pid: string) {
     const [p, s] = await Promise.all([apiGet(`/patients/${pid}`), apiGet(`/patients/${pid}/summary`)]);
-    if (p.ok) { setPatientId(pid); setPatientName((await p.json()).name); }
+    if (p.ok) {
+      const pj = await p.json();
+      setPatientId(pid); setPatientName(pj.name);
+      const age = pj.dob ? String(new Date().getFullYear() - new Date(pj.dob).getFullYear()) : undefined;
+      setPatientMeta({ age, gender: pj.gender || undefined, weight: pj.weight_kg ? String(pj.weight_kg) : undefined });
+    }
     if (s.ok) setSummary(await s.json());
+  }
+
+  async function getDecisionSupport() {
+    const cc = (entities?.symptoms || []).map((x) => x.trim()).filter(Boolean);
+    if (cc.length === 0) { setError("No symptoms were extracted to send for decision support."); return; }
+    setDsBusy("Getting clinical decision support…"); setError(null);
+    const r = await apiPost("/synthesis/decision-support", {
+      chief_complaints: cc, age: patientMeta.age, gender: patientMeta.gender, patient_weight: patientMeta.weight,
+    });
+    setDsBusy(null);
+    if (!r.ok) { setError(`Decision support failed (${r.status}).`); return; }
+    const data = (await r.json()) as DecisionSupport;
+    setDs(data);
+    if (!data.available) setError("Decision support isn't configured, or the Clinical Synthesis service is unavailable right now.");
+  }
+
+  async function confirmDiagnosis(dx: string) {
+    const cc = (entities?.symptoms || []).map((x) => x.trim()).filter(Boolean);
+    setDsBusy(`Confirming ${dx}…`); setError(null);
+    const r = await apiPost("/synthesis/confirm", {
+      chief_complaints: cc, confirmed_diagnoses: [dx],
+      age: patientMeta.age, gender: patientMeta.gender, patient_weight: patientMeta.weight,
+    });
+    setDsBusy(null);
+    if (!r.ok) { setError(`Confirmation failed (${r.status}).`); return; }
+    const c = await r.json();
+    setDs((prev) => prev ? { ...prev, investigations: c.investigations || [], treatment: c.treatment || [], sources: c.sources || [], confirmed: true } : prev);
+  }
+
+  function addTxToRx(d: TxDrug) {
+    setRx((prev) => [...prev, {
+      brand: d.brands[0] || d.drug, generic: d.drug, strength: d.dose || null, form: null,
+      dose: d.dose_needs_doctor ? "" : d.dose, frequency: d.frequency, duration: d.duration,
+      instructions: d.route ? `Route: ${d.route}` : "",
+      warning: d.dose_needs_doctor ? d.dose_flag || "Dose needs the doctor to set it." : undefined,
+    }]);
   }
 
   useEffect(() => {
@@ -101,16 +151,34 @@ export default function ScribePage() {
     const chunks = chunksRef.current; const len = chunks.reduce((a, c) => a + c.length, 0);
     if (len === 0) { setError("No audio captured."); return; }
     const merged = new Float32Array(len); let off = 0; for (const c of chunks) { merged.set(c, off); off += c.length; }
-    await transcribe(encodeWav(merged, rateRef.current));
+    await transcribeBuffer(merged, rateRef.current);
   }
 
-  async function transcribe(blob: Blob) {
-    setBusy("Transcribing…"); setError(null);
-    const form = new FormData(); form.append("file", blob, "consultation.wav");
-    const r = await apiUpload("/scribe/transcribe", form); setBusy(null);
-    if (!r.ok) { setError(`Transcription failed (${r.status}). ${await r.text()}`); return; }
-    const seg = (await r.json()).transcript || "";
-    if (seg.trim()) { setTranscript((prev) => (prev.trim() ? prev.trim() + "\n" + seg : seg)); setSegments((n) => n + 1); }
+  // Sarvam's sync STT caps a request at ~30s. Split any-length audio into
+  // ≤28s windows, transcribe each in order, then stitch the text together —
+  // so the doctor can record for as long as they like.
+  async function transcribeBuffer(samples: Float32Array, rate: number) {
+    setError(null);
+    // gpt-4o-transcribe takes up to 25 min / 25 MB per call; 3-min WAV chunks stay
+    // well under the size cap and keep the number of requests small. (If falling back
+    // to Sarvam's 30 s REST endpoint, this needs to be <= 28.)
+    const STT_CHUNK_SEC = 180;
+    const chunkLen = Math.max(1, Math.floor(rate * STT_CHUNK_SEC));
+    const total = Math.max(1, Math.ceil(samples.length / chunkLen));
+    const parts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      setBusy(total > 1 ? `Transcribing part ${i + 1} of ${total}…` : "Transcribing…");
+      const slice = new Float32Array(samples.subarray(i * chunkLen, Math.min((i + 1) * chunkLen, samples.length)));
+      const form = new FormData();
+      form.append("file", encodeWav(slice, rate), "consultation.wav");
+      const r = await apiUpload("/scribe/transcribe", form);
+      if (!r.ok) { setBusy(null); setError(`Transcription failed (${r.status}). ${await r.text()}`); return; }
+      const t = ((await r.json()).transcript || "").trim();
+      if (t) parts.push(t);
+    }
+    setBusy(null);
+    const seg = parts.join(" ").trim();
+    if (seg) { setTranscript((prev) => (prev.trim() ? prev.trim() + "\n" + seg : seg)); setSegments((n) => n + 1); }
   }
 
   async function analyze(mode: "interim" | "final") {
@@ -132,7 +200,7 @@ export default function ScribePage() {
           <div className="mt-4 flex flex-wrap justify-center gap-3">
             <Link href={`/visits/${saved.visit_id}/print`} className="btn-primary">Print / Export PDF</Link>
             <Link href={`/patients/${saved.patient_id}`} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">View patient record</Link>
-            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); setRx([]); setConsiderations(null); setConsent(false); }}
+            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); setRx([]); setConsiderations(null); setConsent(false); setDs(null); }}
               className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">New consultation</button>
           </div>
         </div>
@@ -147,7 +215,10 @@ export default function ScribePage() {
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">New Consultation</h1>
           <p className="text-sm text-slate-500">Records the doctor–patient conversation → dialogue, SOAP, follow-ups. Physician reviews everything.</p>
         </div>
-        <Link href="/patients" className="text-sm text-slate-500 transition hover:text-slate-900">← Patients</Link>
+        <div className="flex items-center gap-4">
+          <Link href={patientId ? `/scribe/live?patient=${patientId}` : "/scribe/live"} className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700">◉ Go live</Link>
+          <Link href="/patients" className="text-sm text-slate-500 transition hover:text-slate-900">← Patients</Link>
+        </div>
       </header>
 
       {/* Patient attach + history */}
@@ -160,7 +231,7 @@ export default function ScribePage() {
             </div>
             <div className="flex items-center gap-3 text-sm">
               {summary && summary.visit_count > 0 && <button onClick={() => setShowHistory(!showHistory)} className="text-blue-600">{showHistory ? "Hide history" : "Show history"}</button>}
-              <button onClick={() => { setPatientId(null); setSummary(null); setPatientName(""); }} className="text-slate-400 hover:text-slate-700">Detach</button>
+              <button onClick={() => { setPatientId(null); setSummary(null); setPatientName(""); setPatientMeta({}); setDs(null); }} className="text-slate-400 hover:text-slate-700">Detach</button>
             </div>
           </>
         ) : (
@@ -190,7 +261,7 @@ export default function ScribePage() {
             {recording ? "Recording…" : busy ? busy
               : !consent && segments === 0 ? "Confirm consent to enable recording."
               : segments > 0 ? `${segments} segment${segments > 1 ? "s" : ""} recorded — record more or analyse`
-              : "Keep each segment short (~30s) for now."}
+              : "Record for as long as you need — long clips are transcribed in parts automatically."}
           </span>
         </div>
       </div>
@@ -269,6 +340,11 @@ export default function ScribePage() {
             ))}
           </div>
         </section>
+      )}
+
+      {soap && (
+        <DecisionSupportPanel ds={ds} busy={dsBusy} hasSymptoms={(entities?.symptoms || []).length > 0}
+          onGet={getDecisionSupport} onConfirm={confirmDiagnosis} onAddRx={addTxToRx} />
       )}
 
       {soap && <RxSection items={rx} setItems={setRx} summary={summary} />}
@@ -419,6 +495,129 @@ function AttachPatient({ onAttach }: { onAttach: (id: string) => void }) {
   );
 }
 
+const likeColor: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", medium: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
+const urgColor: Record<string, string> = { immediate: "bg-red-600 text-white", urgent: "bg-amber-500 text-white", routine: "bg-slate-400 text-white" };
+
+function DecisionSupportPanel({ ds, busy, hasSymptoms, onGet, onConfirm, onAddRx }: {
+  ds: DecisionSupport | null; busy: string | null; hasSymptoms: boolean;
+  onGet: () => void; onConfirm: (dx: string) => void; onAddRx: (d: TxDrug) => void;
+}) {
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-700">
+        Clinical decision support
+        <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-indigo-700">Clinical Synthesis · ICMR-grounded</span>
+        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-500">Physician review only</span>
+      </h2>
+
+      {!ds ? (
+        <div className="glass flex items-center gap-3 rounded-2xl p-4">
+          <button onClick={onGet} disabled={!!busy || !hasSymptoms} className="btn-primary disabled:opacity-40">
+            {busy ? busy : "Get decision support"}
+          </button>
+          <span className="text-xs text-slate-500">
+            {!hasSymptoms ? "Analyse the consultation first — needs extracted symptoms."
+              : "Sends the extracted symptoms to Clinical Synthesis for a differential, investigations and empiric treatment."}
+          </span>
+        </div>
+      ) : !ds.available ? (
+        <div className="glass rounded-2xl p-4 text-sm text-slate-500">
+          Decision support is unavailable. <button onClick={onGet} className="text-blue-600">Retry</button>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {ds.must_not_miss.length > 0 && (
+            <div className="rounded-xl border border-red-200 bg-red-50 p-3">
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-red-700">Must not miss</p>
+              <div className="flex flex-wrap gap-1.5">
+                {ds.must_not_miss.map((m, i) => <span key={i} className="rounded-full bg-red-600 px-2 py-0.5 text-xs font-medium text-white">{m.diagnosis}</span>)}
+              </div>
+            </div>
+          )}
+
+          {ds.differential_diagnosis.length > 0 && (
+            <div className="glass rounded-2xl p-4">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Differential diagnosis {ds.confirmed && <span className="text-emerald-600">· confirmed</span>}</p>
+              <ul className="space-y-2">
+                {ds.differential_diagnosis.map((d, i) => (
+                  <li key={i} className="border-b border-slate-100 pb-2 last:border-0 last:pb-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium text-slate-900">{d.diagnosis}</span>
+                      {d.likelihood && <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${likeColor[d.likelihood.toLowerCase()] || likeColor.low}`}>{d.likelihood}</span>}
+                      {d.icd10 && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-mono text-slate-500">{d.icd10}</span>}
+                      {!ds.confirmed && <button onClick={() => onConfirm(d.diagnosis)} disabled={!!busy} className="ml-auto text-xs font-medium text-blue-600 hover:text-blue-700 disabled:opacity-40">Confirm →</button>}
+                    </div>
+                    {d.reasoning && <p className="mt-0.5 text-xs text-slate-500">{d.reasoning}</p>}
+                  </li>
+                ))}
+              </ul>
+              {busy && <p className="mt-2 text-xs text-slate-400">{busy}</p>}
+            </div>
+          )}
+
+          {ds.investigations.length > 0 && (
+            <div className="glass rounded-2xl p-4">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Investigations to consider</p>
+              <ul className="space-y-1.5">
+                {ds.investigations.map((iv, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm">
+                    <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${urgColor[iv.urgency.toLowerCase()] || urgColor.routine}`}>{iv.urgency}</span>
+                    <span className="text-slate-700">
+                      <span className="font-medium">{iv.investigation}</span>
+                      {iv.mnm_floor && <span className="ml-1 text-[10px] font-semibold text-red-600">must-not-miss</span>}
+                      {iv.rationale && <span className="text-slate-500"> — {iv.rationale}</span>}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {ds.treatment.length > 0 && (
+            <div className="glass rounded-2xl p-4">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Suggested treatment <span className="font-normal normal-case text-slate-400">(review &amp; add to prescription)</span></p>
+              {ds.treatment.map((t, ti) => (
+                <div key={ti} className="mb-3 last:mb-0">
+                  {t.diagnosis && <p className="mb-1 text-xs font-medium text-slate-600">{t.diagnosis}</p>}
+                  <ul className="space-y-2">
+                    {t.first_line.map((d, di) => (
+                      <li key={di} className="rounded-lg border border-slate-200 p-2.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <span className="text-sm font-medium text-slate-900">{d.drug}</span>
+                            <span className="text-xs text-slate-600"> {[d.dose, d.route, d.frequency, d.duration].filter(Boolean).join(" · ")}</span>
+                            {d.brands.length > 0 && <div className="text-xs text-slate-400">Brands: {d.brands.join(", ")}</div>}
+                          </div>
+                          <button onClick={() => onAddRx(d)} className="shrink-0 rounded-lg bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-700">+ Rx</button>
+                        </div>
+                        {d.dose_needs_doctor && <p className="mt-1 rounded bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700">⚠ {d.dose_flag || "Dose needs the doctor to set it."}</p>}
+                      </li>
+                    ))}
+                  </ul>
+                  {t.non_pharmacological.length > 0 && (
+                    <ul className="mt-1.5 list-disc pl-5 text-xs text-slate-500">
+                      {t.non_pharmacological.map((x, i) => <li key={i}>{x}</li>)}
+                    </ul>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {ds.confirmed && ds.sources && ds.sources.length > 0 && (
+            <details className="glass rounded-2xl p-4">
+              <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-500">Evidence sources ({ds.sources.length})</summary>
+              <ul className="mt-2 space-y-1.5">
+                {ds.sources.map((s, i) => <li key={i} className="text-xs text-slate-500"><span className="font-medium text-slate-600">{s.book}{s.page ? `, p.${s.page}` : ""}</span>{s.snippet ? ` — ${s.snippet}` : ""}</li>)}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function RxSection({ items, setItems, summary }: { items: RxItem[]; setItems: (v: RxItem[]) => void; summary: Summary | null }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<DrugResult[]>([]);
@@ -443,7 +642,7 @@ function RxSection({ items, setItems, summary }: { items: RxItem[]; setItems: (v
   }
 
   function add(d: DrugResult) {
-    setItems([...items, { brand: d.brand_name, generic: d.generic_name, strength: d.strength, form: d.dosage_form, dose: "", frequency: "", duration: "", instructions: "", warning: checkSafety(d.generic_name) }]);
+    setItems([...items, { brand: d.brand_name, generic: d.generic_name, strength: d.strength, form: d.form, dose: "", frequency: "", duration: "", instructions: "", warning: checkSafety(d.generic_name) }]);
     setQ(""); setResults([]);
   }
   const update = (i: number, patch: Partial<RxItem>) => setItems(items.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
@@ -459,8 +658,12 @@ function RxSection({ items, setItems, summary }: { items: RxItem[]; setItems: (v
             <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
               {results.map((d, i) => (
                 <button key={i} onClick={() => add(d)} className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50">
-                  <span className="font-medium text-slate-900">{d.brand_name}</span>
-                  <span className="text-xs text-slate-500"> — {[d.generic_name, d.strength, d.dosage_form].filter(Boolean).join(" · ")}</span>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium text-slate-900">{d.brand_name}</span>
+                    {d.mrp != null && d.mrp !== "" && <span className="shrink-0 text-xs text-slate-500">₹{d.mrp}</span>}
+                  </div>
+                  <span className="text-xs text-slate-500">{[d.generic_name, d.strength, d.form].filter(Boolean).join(" · ")}</span>
+                  {d.drug_class && <span className="ml-1 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">{d.drug_class}</span>}
                 </button>
               ))}
             </div>
