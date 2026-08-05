@@ -301,7 +301,7 @@ async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user))
     considerations = _considerations(data.get("clinical_considerations"))
     # Red flags come from the model's contextual reasoning only. The broad KB
     # fuzzy-matcher (kb_ground_red_flags) was retired here — it surfaced conditions
-    # unrelated to the presentation (e.g. liver cancer for an ankle sprain). Clinical Synthesis's
+    # unrelated to the presentation (e.g. liver cancer for an ankle sprain). the synthesis service's
     # must-not-miss (decision-support panel) is the grounded safety net now.
     considerations["red_flags"] = _trim_flags(considerations["red_flags"], keep=4, action_max=200)
     # De-duplicate follow-ups against the red flags and sort by severity.

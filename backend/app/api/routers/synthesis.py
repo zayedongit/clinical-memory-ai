@@ -1,6 +1,6 @@
-"""Clinical Synthesis Clinical Synthesis API — decision-support proxy.
+"""Clinical Synthesis API — decision-support proxy.
 
-We call Clinical Synthesis's production clinical brain (ICMR/MoHFW-grounded DDx, investigations,
+We call the synthesis service's production clinical brain (ICMR/MoHFW-grounded DDx, investigations,
 treatment) from OUR backend only — the base URL is a shared secret and the upstream
 is unauthenticated, so it must never be reachable from the browser. Everything here
 is PHYSICIAN-REVIEW-ONLY decision support; the physician remains the decision maker.
@@ -11,7 +11,7 @@ Endpoints:
   POST /synthesis/confirm           — a chosen diagnosis -> locked investigations + treatment.
 
 Fail-open: on any upstream error we return empty lists (never a 5xx mid-encounter),
-mirroring Clinical Synthesis's own contract.
+mirroring the synthesis service's own contract.
 """
 import asyncio
 
