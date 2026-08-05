@@ -24,30 +24,51 @@ from ...core.supabase import audit, rest, user_headers
 router = APIRouter(prefix="/scribe")
 
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
+OPENAI_STT_URL = "https://api.openai.com/v1/audio/transcriptions"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 
 # --------------------------------------------------------------------- #
-# Speech-to-text (Sarvam)
+# Speech-to-text — OpenAI gpt-4o-transcribe (preferred), Sarvam fallback
 # --------------------------------------------------------------------- #
-@router.post("/transcribe")
-async def transcribe(file: UploadFile = File(...), user: CurrentUser = Depends(get_current_user)):
-    s = get_settings()
-    if not s.sarvam_api_key:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "SARVAM_API_KEY not configured")
-    audio = await file.read()
-    files = {"file": (file.filename or "audio.wav", audio, file.content_type or "audio/wav")}
+async def _stt_openai(s, filename: str, audio: bytes, content_type: str) -> dict:
+    files = {"file": (filename, audio, content_type)}
+    data = {"model": s.openai_stt_model, "response_format": "json"}
+    async with httpx.AsyncClient(timeout=180) as client:
+        r = await client.post(OPENAI_STT_URL, headers={"Authorization": f"Bearer {s.openai_api_key}"},
+                              data=data, files=files)
+    if r.status_code != 200:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"STT error {r.status_code}: {r.text[:300]}")
+    return {"transcript": r.json().get("text", ""), "language": None}
+
+
+async def _stt_sarvam(s, filename: str, audio: bytes, content_type: str) -> dict:
+    files = {"file": (filename, audio, content_type)}
     data = {"model": s.sarvam_stt_model, "language_code": s.sarvam_stt_language}
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(SARVAM_STT_URL, headers={"api-subscription-key": s.sarvam_api_key},
-                                  data=data, files=files)
-    except httpx.HTTPError as e:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"STT request failed: {e}")
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(SARVAM_STT_URL, headers={"api-subscription-key": s.sarvam_api_key},
+                              data=data, files=files)
     if r.status_code != 200:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"STT error {r.status_code}: {r.text[:300]}")
     body = r.json()
     return {"transcript": body.get("transcript", ""), "language": body.get("language_code")}
+
+
+@router.post("/transcribe")
+async def transcribe(file: UploadFile = File(...), user: CurrentUser = Depends(get_current_user)):
+    s = get_settings()
+    if not s.openai_api_key and not s.sarvam_api_key:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "No speech-to-text provider configured (set OPENAI_API_KEY or SARVAM_API_KEY).")
+    audio = await file.read()
+    fname = file.filename or "audio.wav"
+    ctype = file.content_type or "audio/wav"
+    try:
+        if s.openai_api_key:
+            return await _stt_openai(s, fname, audio, ctype)
+        return await _stt_sarvam(s, fname, audio, ctype)
+    except httpx.HTTPError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"STT request failed: {e}")
 
 
 # --------------------------------------------------------------------- #
@@ -465,6 +486,86 @@ def _dedupe_followups(fups: list[dict], red_flags: list[dict]) -> list[dict]:
     kept.sort(key=lambda q: (_SEV_RANK.get(str(q.get("severity", "low")).lower(), 3),
                              -int(q.get("likelihood_pct") or 0)))
     return kept
+
+
+# --------------------------------------------------------------------- #
+# Live consultation — fast, low-latency pass over the running transcript
+# --------------------------------------------------------------------- #
+class LiveRequest(BaseModel):
+    transcript: str
+    patient_context: str | None = None
+
+
+def _live_prompt(context: str, transcript: str) -> str:
+    return (
+        "You are a live clinical documentation assistant listening to an ongoing doctor-patient "
+        "consultation that may mix Hindi and English (Hinglish). You are NOT a doctor and never "
+        "diagnose or prescribe. Work fast. From the running transcript so far, return STRICT JSON:\n"
+        '{\n'
+        '  "translation": "a clean ENGLISH translation/paraphrase of the conversation so far (concise)",\n'
+        '  "symptoms": ["key presenting symptoms mentioned so far"],\n'
+        '  "red_flags": [{"finding":"concerning symptom/sign","concern":"serious condition it could indicate",'
+        '"urgency":"emergency|urgent|routine","action":"brief suggested action"}],\n'
+        '  "questions": [{"question":"a brief instruction to the doctor starting with Ask/Check/Assess",'
+        '"severity":"low|moderate|high"}]\n'
+        "}\n"
+        "Only include red flags genuinely supported by the transcript; empty array if none. "
+        "Give 2-4 questions. Everything is physician-review-only. Do not invent facts.\n\n"
+        f"PATIENT CONTEXT (may be empty):\n{context or '(none)'}\n\n"
+        f"RUNNING TRANSCRIPT:\n{transcript}"
+    )
+
+
+async def _gemini_json(prompt: str, max_tokens: int = 2048) -> dict | None:
+    """Compact Gemini JSON call with model fallback — used by the live lane."""
+    s = get_settings()
+    if not s.gemini_api_key:
+        return None
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2, "maxOutputTokens": max_tokens},
+    }
+    models: list[str] = []
+    for m in [s.gemini_model, "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"]:
+        if m and m not in models:
+            models.append(m)
+    async with httpx.AsyncClient(timeout=30) as client:
+        for attempt, model in enumerate(models):
+            url = f"{GEMINI_BASE}/models/{model}:generateContent"
+            try:
+                r = await client.post(url, params={"key": s.gemini_api_key}, json=payload)
+            except httpx.HTTPError:
+                r = None
+            else:
+                if r.status_code == 200:
+                    return _parse_gemini_json(r.json())
+                if r.status_code not in (429, 500, 502, 503, 504):
+                    break
+            if attempt < len(models) - 1:
+                await asyncio.sleep(1.0 * (attempt + 1))
+    return None
+
+
+@router.post("/live")
+async def live(body: LiveRequest, user: CurrentUser = Depends(get_current_user)):
+    if len(body.transcript.strip()) < 3:
+        return {"translation": "", "symptoms": [], "red_flags": [], "questions": []}
+    data = await _gemini_json(_live_prompt(body.patient_context or "", body.transcript), 2048) or {}
+    symptoms = [str(x).strip() for x in (data.get("symptoms") or []) if str(x).strip()][:12]
+    # Ground the red flags in the curated KB, then merge with the model's.
+    cc = _considerations({"red_flags": data.get("red_flags"), "completeness_pct": 0})
+    cc = _merge_considerations(cc, await kb_ground_red_flags(symptoms, user.token))
+    questions = [
+        {"question": str(q.get("question", "")).strip(),
+         "severity": str(q.get("severity", "low")).strip().lower()}
+        for q in (data.get("questions") or []) if isinstance(q, dict) and q.get("question")
+    ][:5]
+    return {
+        "translation": str(data.get("translation", "")).strip(),
+        "symptoms": symptoms,
+        "red_flags": cc["red_flags"],
+        "questions": questions,
+    }
 
 
 # --------------------------------------------------------------------- #

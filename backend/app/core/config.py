@@ -20,6 +20,17 @@ class Settings(BaseSettings):
     sarvam_stt_model: str = "saarika:v2.5"
     sarvam_stt_language: str = "unknown"  # auto-detect / code-mixed (Hinglish)
 
+    # Speech-to-text: OpenAI gpt-4o-transcribe (preferred — 99+ langs, up to 25 min /
+    # 25 MB per call, strong on Hinglish). Falls back to Sarvam if this key is unset.
+    openai_api_key: str = ""
+    openai_stt_model: str = "gpt-4o-transcribe"
+
+    # Clinical Synthesis Clinical Synthesis API (external decision-support brain).
+    # Base URL is treated as a secret (unauthenticated service on a shared budget);
+    # set it in backend env, never commit. API key is optional until the gate exists.
+    synthesis_api_base: str = ""            # e.g. https://synthesis-api.internal
+    synthesis_api_key: str = ""             # sent as X-API-Key when present
+
     # App
     frontend_origin: str = "http://localhost:3000"
 
