@@ -1,46 +1,109 @@
-# Clinical Memory AI
+<div align="center">
 
-A web-first clinical documentation platform for general physicians and small clinics.
-It turns a doctor–patient conversation into a structured, medico-legally-shaped note,
-maintains a longitudinal patient record, and surfaces physician-review-only clinical
-decision support — differential diagnosis, investigations and treatment. **The physician
-is the decision-maker at every step; nothing is finalized without explicit attestation.**
+# 🩺 Clinical Memory AI
 
-> Not an autonomous diagnosis or prescription system. All AI output is a draft for physician review.
+**A web-first clinical documentation & decision-support platform for physicians and small clinics.**
 
-## What it does
+Turn a spoken consultation into a structured, medico-legally-shaped note — with longitudinal
+patient memory and guideline-grounded clinical decision support. The physician stays in control
+at every step.
 
-- **AI Scribe** — records the consultation (multilingual / Hinglish), transcribes it, and
-  auto-populates a **structured encounter** (chief complaints, history, vitals, examination).
-- **Consultation wizard** — a 3-step flow: *Consultation → Prescription → Review & Sign*, with
-  a persistent patient banner (UHID, demographics), drafts, and resume.
-- **Longitudinal memory** — every visit is stored per patient with trends and history-aware notes.
-- **Clinical decision support** — ranked differential (with ICD-10), investigations (urgency),
-  and evidence-based treatment with local drug brands + prices. Grounded, physician-review-only.
-- **Prescription** — search a real hospital formulary (brands, strengths, MRP, therapeutic class)
-  with allergy/duplicate safety checks against the patient's own record.
-- **Safety & trust** — recording consent, physician attestation (enforced), audit trail,
-  printable prescription / visit record.
+![CI](https://github.com/zayedongit/clinical-memory-ai/actions/workflows/ci.yml/badge.svg)
+![Next.js](https://img.shields.io/badge/Next.js-000?logo=next.js&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![Supabase](https://img.shields.io/badge/Supabase-3FCF8E?logo=supabase&logoColor=white)
 
-## Architecture
+</div>
 
-| Layer | Tech |
+> ⚕️ **Not an autonomous diagnosis or prescription system.** Every AI output is a draft the
+> physician reviews, edits, and explicitly attests before it becomes part of the record.
+
+---
+
+## ✨ What it does
+
+- **🎙️ AI Scribe** — records the consultation (multilingual, incl. Hindi/English code-mixing),
+  transcribes it, and **auto-populates a structured encounter** (chief complaints, history,
+  vitals, examination).
+- **🧭 Consultation wizard** — a clean 3-step flow (**Consultation → Prescription → Review & Sign**)
+  with a persistent patient banner, draft/resume, and physician attestation.
+- **🧠 Longitudinal memory** — every visit is stored per patient with history-aware notes and
+  cross-visit trends.
+- **🔬 Clinical decision support** — ranked **differential diagnosis with ICD-10 codes**,
+  investigations (with urgency), and evidence-based treatment with local drug **brands + prices** —
+  guideline-grounded and physician-review-only.
+- **💊 Real formulary** — search a **100k-item hospital catalogue** (brands, strengths, MRP,
+  therapeutic class) with allergy/duplicate safety checks against the patient's own record.
+- **🔒 Safety & trust by design** — recording consent, enforced physician attestation, an audit
+  trail, and a printable prescription / visit record.
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart LR
+  Dr([👩‍⚕️ Physician]) --> FE[Next.js App<br/>App Router · TS · Tailwind]
+  FE -->|Supabase JWT| BE[FastAPI Backend<br/>Python 3.12]
+  FE --> AUTH[(Supabase Auth)]
+  BE --> DB[(Supabase Postgres<br/>Row-Level Security)]
+  BE --> STT[OpenAI gpt-4o-transcribe<br/>· Sarvam fallback]
+  BE --> LLM[Google Gemini<br/>structuring]
+  BE --> SYN[Clinical Synthesis API<br/>guideline-grounded DDx/Ix/Tx]
+```
+
+Multi-tenant by design: **every clinical table is clinic-scoped via Postgres Row-Level Security**,
+enforced by passing the user's JWT through to PostgREST.
+
+## 🔄 The consultation flow
+
+```mermaid
+flowchart LR
+  A[Register / search<br/>patient] --> B[Structured encounter<br/>Scribe auto-fill or manual]
+  B --> C[Differential<br/>+ ICD-10]
+  C --> D[Investigations<br/>by urgency]
+  D --> E[Treatment<br/>+ prescription]
+  E --> F[Review & Sign<br/>attestation]
+  F --> G[Saved record<br/>+ PDF]
+```
+
+## 🧪 Engineering highlights
+
+- **Measured clinical quality, not vibes** — a red-flag **evaluation harness** scores the
+  decision support against classic can't-miss presentations and reports recall + a
+  no-false-alarm (precision) metric, runnable in CI without an LLM.
+- **Multi-tenant isolation** — Row-Level Security with an isolation proof in the schema tests.
+- **Safety-by-design** — consent capture, server-enforced physician attestation, and an
+  append-only audit log.
+- **Resilient AI pipeline** — provider fallback for speech-to-text, model fallback + JSON
+  repair for structuring, and fail-open decision support so a partial encounter never hard-fails.
+- **Real-world data** — ingestion of a 100k-item hospital formulary and an ICMR-derived
+  knowledge base for grounding.
+- **CI** — lint, typecheck, and build on every push.
+
+## 🧰 Tech stack
+
+| Layer | Technology |
 |---|---|
-| Frontend | Next.js (App Router), TypeScript, Tailwind |
-| Backend | FastAPI (Python 3.12), `uv` |
+| Frontend | Next.js (App Router), TypeScript, Tailwind CSS |
+| Backend | FastAPI, Python 3.12, `uv` |
 | Database / Auth / Storage | Supabase (PostgreSQL + Row-Level Security) |
 | Speech-to-text | OpenAI `gpt-4o-transcribe` (Sarvam fallback) |
 | LLM structuring | Google Gemini |
-| Decision support | Clinical Synthesis API (external, guideline-grounded) |
+| Decision support | External Clinical Synthesis API (guideline-grounded) |
+| Deploy | Cloudflare (OpenNext) · containerized backend |
 
-Multi-tenant by design: every clinical table is clinic-scoped via Postgres Row-Level Security.
+## 📸 Screenshots
 
-## Getting started
+> Add screenshots to `docs/screenshots/` and reference them here, e.g.:
+> `![Consultation wizard](docs/screenshots/consult.png)`
+
+## 🚀 Getting started
 
 ```bash
 # backend
 cd backend
-cp .env.example .env          # fill in your own keys (see below)
+cp .env.example .env          # fill in your own keys
 uv sync
 uv run fastapi dev app/main.py
 
@@ -49,26 +112,33 @@ cd frontend
 cp .env.local.example .env.local
 pnpm install
 pnpm dev
-```
 
-Apply the database schema with the Supabase CLI:
-
-```bash
+# database
 supabase db push
 ```
 
-### Configuration
+Configuration lives in `backend/.env` (git-ignored). See `backend/.env.example` for the full
+list. **Never commit real keys**; the frontend uses only the public Supabase anon key.
 
-All secrets live in `backend/.env` (git-ignored). See `backend/.env.example` for the full list —
-Supabase URL/keys, `GEMINI_API_KEY`, `OPENAI_API_KEY`, and the Clinical Synthesis API base URL. **Never commit
-real keys.** The frontend uses only the public Supabase anon key.
+## 📁 Project structure
 
-## Status
+```
+clinical-memory-ai/
+├── frontend/        # Next.js app (consultation wizard, patient records, dashboard)
+├── backend/         # FastAPI (scribe, decision-support proxy, formulary, RLS-scoped CRUD)
+│   ├── app/
+│   ├── scripts/     # data ingestion (formulary, knowledge base)
+│   └── eval/        # red-flag evaluation harness
+├── supabase/        # SQL migrations (schema, RLS, functions)
+└── docs/
+```
 
-Active development. This repository is a working prototype, not a certified medical device.
+## ⚕️ Status & disclaimer
 
-## License
+Active development — a working prototype, **not a certified medical device**. AI output is
+decision *support* for a licensed physician, who remains the responsible clinician.
 
-© Clinical Memory AI. All rights reserved. This source is made public for
-viewing and reference only; it is not licensed for reuse, redistribution, or
-commercial use without explicit written permission.
+## 📜 License
+
+© Clinical Memory AI. All rights reserved. This source is public for viewing and reference only;
+it is not licensed for reuse, redistribution, or commercial use without written permission.
