@@ -107,11 +107,16 @@ async def patient_summary(patient_id: str, user: CurrentUser = Depends(get_curre
     parts: list[str] = []
     if notes:
         parts.append(f"{len(notes)} prior visit(s) on record.")
-        if problems:  parts.append("Known problems: " + ", ".join(sorted(problems)) + ".")
-        if meds:      parts.append("Previously noted medications: " + ", ".join(sorted(meds)) + ".")
-        if allergies: parts.append("Allergies: " + ", ".join(sorted(allergies)) + ".")
-        if recurring: parts.append("Recurring symptoms: " + ", ".join(f"{x['term']} (x{x['count']})" for x in recurring[:5]) + ".")
-        if since_last.get("new_symptoms"): parts.append("New since last visit: " + ", ".join(since_last["new_symptoms"]) + ".")
+        if problems:
+            parts.append("Known problems: " + ", ".join(sorted(problems)) + ".")
+        if meds:
+            parts.append("Previously noted medications: " + ", ".join(sorted(meds)) + ".")
+        if allergies:
+            parts.append("Allergies: " + ", ".join(sorted(allergies)) + ".")
+        if recurring:
+            parts.append("Recurring symptoms: " + ", ".join(f"{x['term']} (x{x['count']})" for x in recurring[:5]) + ".")
+        if since_last.get("new_symptoms"):
+            parts.append("New since last visit: " + ", ".join(since_last["new_symptoms"]) + ".")
 
     return {
         "visit_count": len(notes),

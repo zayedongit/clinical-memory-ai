@@ -46,15 +46,19 @@ def main():
     data = list(rows())
     print(f"drugs: {len(data)}")
     if DRY:
-        print("DRY_RUN — no writes."); return
+        print("DRY_RUN — no writes.")
+        return
 
     import psycopg2
     from psycopg2.extras import execute_values
-    conn = psycopg2.connect(os.environ["DATABASE_URL"]); cur = conn.cursor()
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
     cur.execute("truncate kb_drugs restart identity;")
     for i in range(0, len(data), 2000):
         execute_values(cur, "insert into kb_drugs (brand_name,generic_name,strength,dosage_form,pack_size,mrp,manufacturer) values %s", data[i:i + 2000])
-    conn.commit(); cur.close(); conn.close()
+    conn.commit()
+    cur.close()
+    conn.close()
     print("✅ kb_drugs loaded.")
 
 
