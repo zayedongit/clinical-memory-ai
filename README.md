@@ -22,6 +22,27 @@ at every step.
 
 ---
 
+## In plain terms
+
+Think about a normal visit to the doctor. The doctor listens to you, asks questions, and while
+doing all that, has to scribble notes, remember your past visits, decide what tests you might
+need, and write a prescription — often in just a few minutes, for patient after patient. A lot
+gets rushed, forgotten, or lost on scraps of paper.
+
+**Clinical Memory AI is like a smart assistant that sits quietly beside the doctor during the
+consultation.** It listens to the conversation (with the patient's permission), and turns it into
+a clean, organized medical note automatically — so the doctor can actually look at the patient
+instead of the keyboard.
+
+It also acts as the clinic's memory. Every visit is saved under that patient, so next time the
+doctor instantly sees the full story: past illnesses, medicines, allergies, and what's changed.
+
+And it gently offers a second opinion — a list of possible causes for the symptoms, tests worth
+considering, and suitable medicines (with real brand names and prices). But here's the important
+part: **it never decides anything on its own.** It only suggests. The doctor reviews everything,
+edits whatever they want, and personally signs off before it becomes official. The AI is the
+helper; the doctor is always the boss.
+
 ## What it does
 
 - **AI Scribe** — records the consultation (multilingual, including Hindi/English code-mixing),
