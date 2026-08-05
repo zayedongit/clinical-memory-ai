@@ -95,7 +95,15 @@ flowchart LR
 
 ## Screenshots
 
-_Coming soon._
+| Structured consultation | AI Scribe → auto-filled encounter |
+|:--:|:--:|
+| ![Structured consultation](docs/screenshots/consultation.png) | ![AI Scribe](docs/screenshots/scribe.png) |
+| **Differential diagnosis with ICD-10** | **Evidence-based treatment + brands** |
+| ![Differential diagnosis](docs/screenshots/differential.png) | ![Treatment](docs/screenshots/treatment.png) |
+
+**Printable prescription / visit record**
+
+![Printable prescription](docs/screenshots/prescription.png)
 
 ## Getting started
 
