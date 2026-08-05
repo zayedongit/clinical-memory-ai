@@ -17,7 +17,7 @@ async def consultations(
     scope: str = "all", q: str | None = None,
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Clinic-wide consultation log + headline stats (Clinical Synthesis-style dashboard)."""
+    """Clinic-wide consultation log + headline stats (clinic dashboard)."""
     params = {
         "select": "id,started_at,approved_at,status,doctor_id,patient_id,"
                   "patients(name,uhid),soap_notes(assessment,subjective)",

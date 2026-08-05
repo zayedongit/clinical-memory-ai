@@ -65,8 +65,8 @@ export default function LiveConsult() {
   const metaRef = useRef<{ age?: string; gender?: string; weight?: string }>({});
   const contextRef = useRef<string>("");
   const patientIdRef = useRef<string | null>(null);
-  const synthesisAtRef = useRef(0);
-  const synthesisCountRef = useRef(0);
+  const synthAtRef = useRef(0);
+  const synthCountRef = useRef(0);
   const [ended, setEnded] = useState(false);
 
   useEffect(() => {
@@ -163,8 +163,8 @@ export default function LiveConsult() {
   async function maybeSynth(syms: string[]) {
     if (syms.length === 0) return;
     const now = Date.now();
-    if (now - synthesisAtRef.current < 25000 && syms.length <= synthesisCountRef.current) return;
-    synthesisAtRef.current = now; synthesisCountRef.current = syms.length;
+    if (now - synthAtRef.current < 25000 && syms.length <= synthCountRef.current) return;
+    synthAtRef.current = now; synthCountRef.current = syms.length;
     const r = await apiPost("/synthesis/decision-support", {
       chief_complaints: syms, age: metaRef.current.age, gender: metaRef.current.gender, patient_weight: metaRef.current.weight,
     });

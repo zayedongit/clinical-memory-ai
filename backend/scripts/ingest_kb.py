@@ -34,7 +34,7 @@ TERM_FILES = {
 
 
 def cma(cid: str) -> str:
-    """Re-namespace a condition id: 'synthesis:x' -> 'cma:x'."""
+    """Re-namespace a condition id: 'src:x' -> 'cma:x'."""
     if cid and ":" in cid:
         return "cma:" + cid.split(":", 1)[1]
     return cid

@@ -31,7 +31,7 @@ is the decision-maker at every step; nothing is finalized without explicit attes
 | Database / Auth / Storage | Supabase (PostgreSQL + Row-Level Security) |
 | Speech-to-text | OpenAI `gpt-4o-transcribe` (Sarvam fallback) |
 | LLM structuring | Google Gemini |
-| Decision support | Clinical Synthesis Clinical Synthesis API (external, guideline-grounded) |
+| Decision support | Clinical Synthesis API (external, guideline-grounded) |
 
 Multi-tenant by design: every clinical table is clinic-scoped via Postgres Row-Level Security.
 
