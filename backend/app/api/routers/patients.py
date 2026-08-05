@@ -13,17 +13,17 @@ from ...schemas import (
 
 router = APIRouter(prefix="/patients")
 
-_SELECT = "id,name,dob,gender,phone,height_cm,weight_kg,created_at"
+_SELECT = "id,name,uhid,dob,gender,phone,address,pincode,city,state,height_cm,weight_kg,created_at"
 
 
 @router.get("", response_model=PatientListResponse)
 async def list_patients(
-    q: str | None = Query(default=None, description="search by name"),
+    q: str | None = Query(default=None, description="search by name, phone or UHID"),
     user: CurrentUser = Depends(get_current_user),
 ) -> PatientListResponse:
     params = {"select": _SELECT, "order": "created_at.desc", "merged_into": "is.null"}
     if q:
-        params["name"] = f"ilike.*{q}*"
+        params["or"] = f"(name.ilike.*{q}*,phone.ilike.*{q}*,uhid.ilike.*{q}*)"
     resp = await rest("GET", "patients", headers=user_headers(user.token), params=params)
     rows = resp.json() if resp.status_code == 200 else []
     items = [PatientResponse(**r) for r in rows]

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Clinical Synthesis Clinical Synthesis API (external decision-support brain).
     # Base URL is treated as a secret (unauthenticated service on a shared budget);
     # set it in backend env, never commit. API key is optional until the gate exists.
-    synthesis_api_base: str = ""            # e.g. https://synthesis-api.internal
+    synthesis_api_base: str = ""            # Clinical Synthesis Clinical Synthesis API base URL (set in .env)
     synthesis_api_key: str = ""             # sent as X-API-Key when present
 
     # App

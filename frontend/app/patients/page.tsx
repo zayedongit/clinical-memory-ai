@@ -7,7 +7,7 @@ import { supabase } from "../../lib/supabaseClient";
 import { apiGet, apiPost } from "../../lib/api";
 
 type Me = { user_id: string; clinic_id: string; role: string; clinic_name: string | null };
-type Patient = { id: string; name: string; gender: string | null; phone: string | null; created_at: string | null };
+type Patient = { id: string; name: string; uhid: string | null; gender: string | null; phone: string | null; created_at: string | null };
 
 export default function PatientsPage() {
   const router = useRouter();
@@ -23,9 +23,10 @@ export default function PatientsPage() {
   const [pName, setPName] = useState("");
   const [pGender, setPGender] = useState("");
   const [pPhone, setPPhone] = useState("");
+  const [q, setQ] = useState("");
 
-  const loadPatients = useCallback(async () => {
-    const res = await apiGet("/patients");
+  const loadPatients = useCallback(async (query?: string) => {
+    const res = await apiGet(`/patients${query && query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ""}`);
     if (res.ok) setPatients((await res.json()).items ?? []);
   }, []);
 
@@ -53,6 +54,12 @@ export default function PatientsPage() {
       await loadMe();
     })();
   }, [router, loadMe]);
+
+  useEffect(() => {
+    if (!me) return;
+    const t = setTimeout(() => { void loadPatients(q); }, 250);
+    return () => clearTimeout(t);
+  }, [q, me, loadPatients]);
 
   async function onboard(e: React.FormEvent) {
     e.preventDefault();
@@ -110,7 +117,8 @@ export default function PatientsPage() {
           <p className="text-sm text-slate-500">{me?.clinic_name}</p>
         </div>
         <div className="flex items-center gap-4">
-          <Link href="/scribe" className="text-sm font-medium text-blue-600 transition hover:text-blue-700">New consultation</Link>
+          <Link href="/consultations" className="text-sm font-medium text-blue-600 transition hover:text-blue-700">Consultations</Link>
+          <Link href="/consult" className="text-sm font-medium text-blue-600 transition hover:text-blue-700">New consultation</Link>
           <Link href="/lookup" className="text-sm font-medium text-blue-600 transition hover:text-blue-700">Clinical lookup</Link>
           <button onClick={signOut} className="text-sm text-slate-500 transition hover:text-slate-900">Sign out</button>
         </div>
@@ -133,17 +141,23 @@ export default function PatientsPage() {
 
       {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
 
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by name, phone or UHID…"
+        className="field mb-3 w-full" />
+
       <div className="glass overflow-hidden rounded-2xl">
         {patients.length === 0 ? (
-          <p className="p-6 text-sm text-slate-400">No patients yet. Add your first above.</p>
+          <p className="p-6 text-sm text-slate-400">{q ? "No matching patients." : "No patients yet. Add your first above."}</p>
         ) : (
           <ul className="divide-y divide-slate-200/70">
             {patients.map((p) => (
               <li key={p.id}>
                 <Link href={`/patients/${p.id}`}
                   className="flex items-center justify-between px-5 py-3.5 transition hover:bg-slate-50/60">
-                  <span className="font-medium text-slate-900">{p.name}</span>
-                  <span className="text-sm text-slate-500">
+                  <span className="min-w-0">
+                    <span className="font-medium text-slate-900">{p.name}</span>
+                    {p.uhid && <span className="ml-2 font-mono text-xs text-slate-400">{p.uhid}</span>}
+                  </span>
+                  <span className="shrink-0 text-sm text-slate-500">
                     {[p.gender, p.phone].filter(Boolean).join(" · ")}
                   </span>
                 </Link>

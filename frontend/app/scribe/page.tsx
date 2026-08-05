@@ -7,6 +7,7 @@ import { supabase } from "../../lib/supabaseClient";
 import { apiGet, apiPost, apiUpload } from "../../lib/api";
 
 type Soap = { subjective: string; objective: string; assessment: string; plan: string };
+type Vitals = { bp: string; hr: string; temp: string; spo2: string; rr: string };
 type Entities = { symptoms: string[]; medications: string[]; allergies: string[]; diagnoses: string[]; follow_up: string[] };
 type Turn = { speaker: "doctor" | "patient"; text: string };
 type FollowUp = { question: string; concern: string; likelihood_pct: number; severity: string };
@@ -41,6 +42,15 @@ function encodeWav(samples: Float32Array, sampleRate: number): Blob {
 
 const sevColor: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
 
+// Clean, user-safe error text — prefer the backend's friendly `detail`, never dump raw JSON.
+async function apiError(r: Response, fallback: string): Promise<string> {
+  try {
+    const d = (await r.json())?.detail;
+    if (typeof d === "string" && d.trim() && d.length < 200) return d;
+  } catch { /* not json */ }
+  return fallback;
+}
+
 export default function ScribePage() {
   const router = useRouter();
   const [recording, setRecording] = useState(false);
@@ -58,12 +68,16 @@ export default function ScribePage() {
   const [segments, setSegments] = useState(0);
   const [isFinal, setIsFinal] = useState(false);
   const [rx, setRx] = useState<RxItem[]>([]);
+  const [vitals, setVitals] = useState<Vitals>({ bp: "", hr: "", temp: "", spo2: "", rr: "" });
   // longitudinal
   const [patientId, setPatientId] = useState<string | null>(null);
   const [patientName, setPatientName] = useState("");
   const [patientMeta, setPatientMeta] = useState<{ age?: string; gender?: string; weight?: string }>({});
   const [summary, setSummary] = useState<Summary | null>(null);
   const [showHistory, setShowHistory] = useState(true);
+  const [fromLive, setFromLive] = useState(false);
+  const [draftVisitId, setDraftVisitId] = useState<string | null>(null);
+  const [draftSaved, setDraftSaved] = useState(false);
   // Clinical Synthesis clinical decision support
   const [ds, setDs] = useState<DecisionSupport | null>(null);
   const [dsBusy, setDsBusy] = useState<string | null>(null);
@@ -86,12 +100,51 @@ export default function ScribePage() {
     if (s.ok) setSummary(await s.json());
   }
 
+  function cleanVitals(): Record<string, string> | undefined {
+    const v = Object.fromEntries(Object.entries(vitals).filter(([, val]) => val.trim()));
+    return Object.keys(v).length ? v : undefined;
+  }
+
+  async function loadDraft(vid: string) {
+    const r = await apiGet(`/visits/${vid}`);
+    if (!r.ok) return;
+    const v = await r.json();
+    const n = v.note;
+    if (!n) return;
+    setDraftVisitId(vid);
+    if (v.patient_id) await attach(v.patient_id);
+    setTranscript(n.transcript || "");
+    setSoap({ subjective: n.subjective || "", objective: n.objective || "", assessment: n.assessment || "", plan: n.plan || "" });
+    setEntities(n.entities || null);
+    setFollowUps(n.follow_up_questions || []);
+    setConsiderations(n.clinical_considerations && Object.keys(n.clinical_considerations).length ? n.clinical_considerations : null);
+    setRx(n.prescription || []);
+    setVitals({ bp: "", hr: "", temp: "", spo2: "", rr: "", ...(n.vitals || {}) });
+    setConsent(!!v.consent_given);
+    setSegments(1);
+  }
+
+  async function saveDraft() {
+    if (!patientId) { setError("Attach a patient to save a draft."); return; }
+    setBusy("Saving draft…"); setError(null); setDraftSaved(false);
+    const r = await apiPost("/scribe/save", {
+      patient_id: patientId, visit_id: draftVisitId ?? undefined, status: "in_progress",
+      transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps,
+      prescription: rx.map(({ warning, ...x }) => x), clinical_considerations: considerations ?? undefined,
+      vitals: cleanVitals(), consent_given: consent, consent_method: consent ? "verbal" : undefined,
+    });
+    setBusy(null);
+    if (!r.ok) { setError(await apiError(r, "Couldn't save the draft.")); return; }
+    setDraftVisitId((await r.json()).visit_id); setDraftSaved(true);
+  }
+
   async function getDecisionSupport() {
     const cc = (entities?.symptoms || []).map((x) => x.trim()).filter(Boolean);
     if (cc.length === 0) { setError("No symptoms were extracted to send for decision support."); return; }
     setDsBusy("Getting clinical decision support…"); setError(null);
     const r = await apiPost("/synthesis/decision-support", {
       chief_complaints: cc, age: patientMeta.age, gender: patientMeta.gender, patient_weight: patientMeta.weight,
+      vitals: cleanVitals(),
     });
     setDsBusy(null);
     if (!r.ok) { setError(`Decision support failed (${r.status}).`); return; }
@@ -126,8 +179,20 @@ export default function ScribePage() {
     (async () => {
       const { data } = await supabase.auth.getSession();
       if (!data.session) { router.push("/login"); return; }
-      const pid = new URLSearchParams(window.location.search).get("patient");
+      const params = new URLSearchParams(window.location.search);
+      const pid = params.get("patient");
       if (pid) await attach(pid);
+      const vid = params.get("visit");
+      if (vid) await loadDraft(vid);
+      // Continued from a Live Consultation → pre-fill the transcript.
+      try {
+        const raw = sessionStorage.getItem("cma_live_handoff");
+        if (raw) {
+          const h = JSON.parse(raw);
+          if (h.transcript) { setTranscript(h.transcript); setSegments(1); setFromLive(true); }
+          sessionStorage.removeItem("cma_live_handoff");
+        }
+      } catch { /* ignore */ }
     })();
   }, [router]);
 
@@ -172,7 +237,7 @@ export default function ScribePage() {
       const form = new FormData();
       form.append("file", encodeWav(slice, rate), "consultation.wav");
       const r = await apiUpload("/scribe/transcribe", form);
-      if (!r.ok) { setBusy(null); setError(`Transcription failed (${r.status}). ${await r.text()}`); return; }
+      if (!r.ok) { setBusy(null); setError(await apiError(r, "Couldn't transcribe that part. Please try again.")); return; }
       const t = ((await r.json()).transcript || "").trim();
       if (t) parts.push(t);
     }
@@ -184,7 +249,7 @@ export default function ScribePage() {
   async function analyze(mode: "interim" | "final") {
     setBusy(mode === "final" ? "Finalising note…" : "Analysing conversation…"); setError(null); setSaved(null);
     const r = await apiPost("/scribe/soap", { transcript, mode, patient_context: summary?.context_text }); setBusy(null);
-    if (!r.ok) { setError(`Analysis failed (${r.status}). ${await r.text()}`); return; }
+    if (!r.ok) { setError(await apiError(r, "Couldn't analyse the consultation. Please press Analyse again.")); return; }
     const d = await r.json();
     setDialogue(d.dialogue || []); setSoap(d.soap); setEntities(d.entities);
     setFollowUps(d.follow_up_questions || []); setConsiderations(d.clinical_considerations || null);
@@ -200,7 +265,7 @@ export default function ScribePage() {
           <div className="mt-4 flex flex-wrap justify-center gap-3">
             <Link href={`/visits/${saved.visit_id}/print`} className="btn-primary">Print / Export PDF</Link>
             <Link href={`/patients/${saved.patient_id}`} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">View patient record</Link>
-            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); setRx([]); setConsiderations(null); setConsent(false); setDs(null); }}
+            <button onClick={() => { setSaved(null); setTranscript(""); setSoap(null); setDialogue([]); setFollowUps([]); setEntities(null); setSegments(0); setIsFinal(false); setRx([]); setConsiderations(null); setConsent(false); setDs(null); setVitals({ bp: "", hr: "", temp: "", spo2: "", rr: "" }); setDraftVisitId(null); setDraftSaved(false); }}
               className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">New consultation</button>
           </div>
         </div>
@@ -220,6 +285,13 @@ export default function ScribePage() {
           <Link href="/patients" className="text-sm text-slate-500 transition hover:text-slate-900">← Patients</Link>
         </div>
       </header>
+
+      {fromLive && (
+        <div className="mb-4 flex items-center gap-2 rounded-xl bg-emerald-50 px-4 py-2.5 text-sm text-emerald-800">
+          <span className="font-medium">Continued from a live consultation.</span>
+          <span className="text-emerald-700">Review the transcript below, then Analyse / Finalise, prescribe, attest &amp; save.</span>
+        </div>
+      )}
 
       {/* Patient attach + history */}
       <div className="glass mb-4 flex items-center justify-between rounded-2xl px-4 py-3">
@@ -263,6 +335,18 @@ export default function ScribePage() {
               : segments > 0 ? `${segments} segment${segments > 1 ? "s" : ""} recorded — record more or analyse`
               : "Record for as long as you need — long clips are transcribed in parts automatically."}
           </span>
+        </div>
+      </div>
+
+      <div className="glass mb-6 rounded-2xl p-4">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Vitals <span className="font-normal normal-case text-slate-400">(optional — sharpens the decision support)</span></p>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+          {([["bp", "BP", "120/80"], ["hr", "HR", "bpm"], ["temp", "Temp", "°F"], ["spo2", "SpO₂", "%"], ["rr", "RR", "/min"]] as const).map(([k, label, ph]) => (
+            <label key={k} className="text-xs text-slate-500">
+              {label}
+              <input value={vitals[k]} onChange={(e) => setVitals({ ...vitals, [k]: e.target.value })} placeholder={ph} className="field mt-0.5 w-full" />
+            </label>
+          ))}
         </div>
       </div>
 
@@ -349,7 +433,13 @@ export default function ScribePage() {
 
       {soap && <RxSection items={rx} setItems={setRx} summary={summary} />}
 
-      {soap && <div className="flex justify-end"><button onClick={() => setShowSave(true)} className="btn-primary">Save visit</button></div>}
+      {soap && (
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          {draftSaved && <span className="text-xs text-emerald-600">Draft saved ✓</span>}
+          {patientId && <button onClick={saveDraft} disabled={!!busy} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600 disabled:opacity-40">Save as draft</button>}
+          <button onClick={() => setShowSave(true)} className="btn-primary">{draftVisitId ? "Complete & save" : "Save visit"}</button>
+        </div>
+      )}
 
       {showSave && soap && (
         <SaveModal onClose={() => setShowSave(false)} onSaved={(res) => { setShowSave(false); setSaved(res); }}
@@ -357,7 +447,8 @@ export default function ScribePage() {
           redFlagCount={considerations?.red_flags.length ?? 0}
           payload={{ transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps,
             prescription: rx.map(({ warning, ...r }) => r), clinical_considerations: considerations ?? undefined,
-            consent_given: consent, consent_method: consent ? "verbal" : undefined }} />
+            vitals: cleanVitals(), consent_given: consent, consent_method: consent ? "verbal" : undefined,
+            visit_id: draftVisitId ?? undefined, status: "completed" }} />
       )}
     </main>
   );
