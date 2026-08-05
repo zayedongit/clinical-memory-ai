@@ -29,9 +29,11 @@ function flatten(chunks: Float32Array[]): Float32Array {
   return out;
 }
 
-const urg: Record<string, string> = { emergency: "border-red-300 bg-red-50", urgent: "border-amber-300 bg-amber-50", routine: "border-slate-200 bg-slate-50" };
 const urgTag: Record<string, string> = { emergency: "bg-red-600 text-white", urgent: "bg-amber-500 text-white", routine: "bg-slate-400 text-white" };
-const sevTag: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
+const dot: Record<string, string> = { emergency: "bg-red-500", urgent: "bg-amber-500", routine: "bg-slate-400" };
+const sevDot: Record<string, string> = { high: "bg-red-500", moderate: "bg-amber-500", low: "bg-slate-300" };
+const like: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", medium: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
+const sectLabel = "mb-2 text-[11px] font-bold uppercase tracking-wide text-slate-500";
 
 export default function LiveConsult() {
   const router = useRouter();
@@ -62,14 +64,17 @@ export default function LiveConsult() {
   // patient context
   const metaRef = useRef<{ age?: string; gender?: string; weight?: string }>({});
   const contextRef = useRef<string>("");
+  const patientIdRef = useRef<string | null>(null);
   const synthesisAtRef = useRef(0);
   const synthesisCountRef = useRef(0);
+  const [ended, setEnded] = useState(false);
 
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
       if (!data.session) { router.push("/login"); return; }
       const pid = new URLSearchParams(window.location.search).get("patient");
+      patientIdRef.current = pid;
       if (pid) {
         const [p, s] = await Promise.all([apiGet(`/patients/${pid}`), apiGet(`/patients/${pid}/summary`)]);
         if (p.ok) { const pj = await p.json(); setPatientName(pj.name);
@@ -118,7 +123,7 @@ export default function LiveConsult() {
       chunksRef.current = []; sentRef.current = 0; rawRef.current = "";
       proc.onaudioprocess = (e) => chunksRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
       const mute = ctx.createGain(); mute.gain.value = 0; src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
-      setLive(true); setStatus("Listening…"); setDs(null); setRedFlags([]); setQuestions([]); setSymptoms([]); setTranscriptEn("");
+      setLive(true); setEnded(false); setStatus("Listening…"); setDs(null); setRedFlags([]); setQuestions([]); setSymptoms([]); setTranscriptEn("");
       rafRef.current = requestAnimationFrame(draw);
       intervalRef.current = setInterval(() => { void tick(false); }, 10000);
     } catch { setStatus("Microphone access denied."); }
@@ -179,7 +184,18 @@ export default function LiveConsult() {
     setLive(false); setStatus("Finishing…");
     await tick(true);
     stopAll();
+    setEnded(true);
     setStatus("Session ended");
+  }
+
+  // Carry the captured consultation into the standard scribe to finalise the
+  // SOAP note, prescribe, attest and save.
+  function handoff() {
+    const t = rawRef.current.trim();
+    if (!t) return;
+    try { sessionStorage.setItem("cma_live_handoff", JSON.stringify({ transcript: t })); } catch { /* ignore */ }
+    const pid = patientIdRef.current;
+    router.push(pid ? `/scribe?patient=${pid}&from=live` : "/scribe?from=live");
   }
 
   return (
@@ -210,10 +226,13 @@ export default function LiveConsult() {
             {!live && <span className="absolute text-xs font-medium text-slate-400">{status === "Session ended" ? "Session ended" : "Press Go live to start"}</span>}
           </div>
 
-          <div className="mt-4 flex items-center gap-3">
+          <div className="mt-4 flex flex-wrap items-center gap-3">
             {!live
               ? <button onClick={start} disabled={!consent} className="btn-primary disabled:opacity-40">● Go live</button>
               : <button onClick={stop} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white">■ Finish</button>}
+            {ended && rawRef.current.trim().length > 0 && (
+              <button onClick={handoff} className="rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-500">Review, prescribe &amp; save →</button>
+            )}
             <span className="flex items-center gap-2 text-xs text-slate-500">
               {live && <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-red-500" />}
               {status}
@@ -228,71 +247,77 @@ export default function LiveConsult() {
           </div>
         </section>
 
-        {/* RIGHT — live decision support */}
-        <section className="space-y-4">
+        {/* RIGHT — clean, prioritised decision support */}
+        <section className="space-y-3">
+          {/* 1. Alerts — only real ones, compact */}
           {redFlags.length > 0 && (
-            <div className="space-y-2">
-              {redFlags.map((f, i) => (
-                <div key={i} className={`rounded-xl border ${urg[f.urgency] || urg.routine} p-3`}>
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="text-sm font-semibold text-slate-900">⚠ {f.finding}</span>
-                    <span className="flex shrink-0 items-center gap-1">
-                      {f.source === "kb" && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-indigo-700">ICMR KB</span>}
-                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${urgTag[f.urgency] || urgTag.routine}`}>{f.urgency}</span>
-                    </span>
-                  </div>
-                  {f.concern && <p className="mt-0.5 text-xs text-slate-600">{f.concern}</p>}
-                  {f.action && <p className="mt-0.5 text-xs font-medium text-slate-700">Consider: {f.action}</p>}
-                </div>
-              ))}
+            <div className="rounded-2xl border border-red-200 bg-red-50/70 p-4">
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-red-700">Alerts</p>
+              <ul className="space-y-2">
+                {redFlags.slice(0, 3).map((f, i) => (
+                  <li key={i}>
+                    <div className="flex items-center gap-2">
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${dot[f.urgency] || dot.routine}`} />
+                      <span className="text-sm font-semibold text-slate-900">{f.finding}</span>
+                      <span className={`ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${urgTag[f.urgency] || urgTag.routine}`}>{f.urgency}</span>
+                    </div>
+                    {f.action && <p className="ml-4 mt-0.5 line-clamp-2 text-xs text-slate-600">{f.action}</p>}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 
+          {/* 2. Working differential (Clinical Synthesis) — the grounded reasoning */}
           <div className="glass rounded-2xl p-4">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Symptoms detected</p>
-            {symptoms.length === 0 ? <p className="text-sm text-slate-400">Listening for symptoms…</p> : (
-              <div className="flex flex-wrap gap-1.5">
-                {symptoms.map((s, i) => <span key={i} className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-700">{s}</span>)}
+            <p className={`${sectLabel} flex items-center gap-2`}>Working differential
+              <span className="rounded bg-indigo-100 px-1 py-0.5 text-[9px] font-bold text-indigo-700">SYNTHESIS</span>
+            </p>
+            {!ds || ds.differential_diagnosis.length === 0 ? (
+              <p className="text-xs text-slate-400">Builds as symptoms are gathered…</p>
+            ) : (
+              <>
+                {ds.must_not_miss.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-1">
+                    {ds.must_not_miss.slice(0, 3).map((m, i) => <span key={i} className="rounded bg-red-600 px-1.5 py-0.5 text-[10px] font-medium text-white">Don&apos;t miss: {m.diagnosis}</span>)}
+                  </div>
+                )}
+                <ol className="space-y-1.5">
+                  {ds.differential_diagnosis.slice(0, 4).map((d, i) => (
+                    <li key={i} className="flex items-center gap-2 text-sm text-slate-700">
+                      <span className="w-3 shrink-0 text-xs text-slate-400">{i + 1}</span>
+                      <span className="font-medium">{d.diagnosis}</span>
+                      {d.likelihood && <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${like[d.likelihood.toLowerCase()] || like.low}`}>{d.likelihood}</span>}
+                    </li>
+                  ))}
+                </ol>
+              </>
+            )}
+          </div>
+
+          {/* 3. Symptoms — compact chips */}
+          <div className="glass rounded-2xl p-4">
+            <p className={sectLabel}>Symptoms</p>
+            {symptoms.length === 0 ? <p className="text-xs text-slate-400">Listening…</p> : (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {symptoms.slice(0, 8).map((s, i) => <span key={i} className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-700">{s}</span>)}
+                {symptoms.length > 8 && <span className="text-xs text-slate-400">+{symptoms.length - 8}</span>}
               </div>
             )}
           </div>
 
+          {/* 4. Ask the patient — top few, one line each */}
           <div className="glass rounded-2xl p-4">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Ask the patient</p>
-            {questions.length === 0 ? <p className="text-sm text-slate-400">Suggested questions will appear here…</p> : (
+            <p className={sectLabel}>Ask the patient</p>
+            {questions.length === 0 ? <p className="text-xs text-slate-400">Suggestions will appear…</p> : (
               <ul className="space-y-1.5">
-                {questions.map((q, i) => (
-                  <li key={i} className="flex items-start justify-between gap-2 text-sm">
-                    <span className="text-slate-700">{q.question}</span>
-                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${sevTag[q.severity] || sevTag.low}`}>{q.severity}</span>
+                {questions.slice(0, 3).map((q, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+                    <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${sevDot[q.severity] || sevDot.low}`} />
+                    <span>{q.question}</span>
                   </li>
                 ))}
               </ul>
-            )}
-          </div>
-
-          <div className="glass rounded-2xl p-4">
-            <div className="mb-2 flex items-center gap-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Live differential</p>
-              <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-indigo-700">Clinical Synthesis</span>
-            </div>
-            {!ds || ds.differential_diagnosis.length === 0 ? <p className="text-sm text-slate-400">Builds as symptoms accumulate…</p> : (
-              <>
-                {ds.must_not_miss.length > 0 && (
-                  <div className="mb-2 flex flex-wrap gap-1.5">
-                    {ds.must_not_miss.map((m, i) => <span key={i} className="rounded-full bg-red-600 px-2 py-0.5 text-xs font-medium text-white">must-not-miss: {m.diagnosis}</span>)}
-                  </div>
-                )}
-                <ul className="space-y-1">
-                  {ds.differential_diagnosis.slice(0, 5).map((d, i) => (
-                    <li key={i} className="flex items-center gap-2 text-sm text-slate-700">
-                      <span className="font-medium">{d.diagnosis}</span>
-                      {d.likelihood && <span className="text-xs text-slate-500">({d.likelihood})</span>}
-                      {d.icd10 && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-mono text-slate-500">{d.icd10}</span>}
-                    </li>
-                  ))}
-                </ul>
-              </>
             )}
           </div>
         </section>

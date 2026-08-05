@@ -28,6 +28,10 @@ class PatientCreateRequest(BaseModel):
     dob: date | None = None
     gender: str | None = None
     phone: str | None = None
+    address: str | None = None
+    pincode: str | None = None
+    city: str | None = None
+    state: str | None = None
 
 
 class PatientUpdateRequest(BaseModel):
@@ -40,9 +44,14 @@ class PatientUpdateRequest(BaseModel):
 class PatientResponse(BaseModel):
     id: str
     name: str
+    uhid: str | None = None
     dob: date | None = None
     gender: str | None = None
     phone: str | None = None
+    address: str | None = None
+    pincode: str | None = None
+    city: str | None = None
+    state: str | None = None
     height_cm: float | None = None
     weight_kg: float | None = None
     created_at: datetime | None = None

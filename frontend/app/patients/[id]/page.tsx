@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { supabase } from "../../../lib/supabaseClient";
 import { apiDelete, apiGet } from "../../../lib/api";
 
-type Patient = { id: string; name: string; gender: string | null; phone: string | null; dob: string | null; height_cm: number | null; weight_kg: number | null };
+type Patient = { id: string; name: string; uhid: string | null; gender: string | null; phone: string | null; dob: string | null; height_cm: number | null; weight_kg: number | null };
 type VisitRow = { id: string; date: string | null; status: string; summary: string };
 type RedFlag = { finding: string; concern: string; urgency: string; action: string; source?: string };
 type Considerations = { red_flags?: RedFlag[]; missing_information?: string[]; suggested_investigations?: { test: string; rationale: string }[]; completeness_pct?: number };
@@ -16,6 +16,7 @@ type Note = {
   entities: Record<string, string[]>; follow_up_questions: { question: string; likelihood_pct: number; severity: string }[];
   prescription?: { brand: string; generic: string | null; strength: string | null; form: string | null; dose: string; frequency: string; duration: string; instructions: string }[];
   clinical_considerations?: Considerations; attested?: boolean;
+  vitals?: Record<string, string>;
 };
 type VisitFull = { id: string; date: string | null; note: Note | null; consent_given?: boolean; consent_method?: string | null };
 type Summary = {
@@ -86,6 +87,7 @@ export default function PatientDetail({ params }: { params: Promise<{ id: string
       <header className="mb-6 flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">{patient?.name}</h1>
+          {patient?.uhid && <p className="mt-0.5 text-xs font-mono text-slate-400">{patient.uhid}</p>}
           <p className="mt-1 text-sm text-slate-500">
             {[patient?.gender, `Age ${ageFrom(patient?.dob ?? null)}`,
               patient?.height_cm ? `${patient.height_cm} cm` : null,
@@ -94,7 +96,7 @@ export default function PatientDetail({ params }: { params: Promise<{ id: string
           </p>
         </div>
         <div className="flex items-center gap-4">
-          <Link href={`/scribe?patient=${id}`} className="text-sm font-medium text-blue-600 hover:text-blue-700">New consultation</Link>
+          <Link href={`/consult?patient=${id}`} className="text-sm font-medium text-blue-600 hover:text-blue-700">New consultation</Link>
           <Link href="/patients" className="text-sm text-slate-500 hover:text-slate-900">← Patients</Link>
         </div>
       </header>
@@ -194,6 +196,12 @@ function VisitNote({ note, visit }: { note: Note; visit?: VisitFull }) {
               {f.concern && <p className="mt-0.5 text-xs text-slate-600">{f.concern}</p>}
             </div>
           ))}
+        </div>
+      )}
+      {note.vitals && Object.values(note.vitals).some(Boolean) && (
+        <div className="mb-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Vitals</p>
+          <p className="text-slate-700">{Object.entries({ BP: note.vitals.bp, HR: note.vitals.hr, Temp: note.vitals.temp, "SpO₂": note.vitals.spo2, RR: note.vitals.rr }).filter(([, v]) => v).map(([k, v]) => `${k} ${v}`).join("  ·  ")}</p>
         </div>
       )}
       <Field label="Subjective" value={note.subjective} />

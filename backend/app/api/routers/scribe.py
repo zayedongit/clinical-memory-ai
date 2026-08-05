@@ -155,9 +155,11 @@ Formatting rules:
   Do NOT write it as a verbatim question to the patient.
 - clinical_considerations.red_flags: ONLY include genuine red flags actually supported by the
   transcript/history (e.g. chest pain/pressure, breathlessness at rest, neuro deficits, severe
-  or worsening pain, bleeding, high fever with stiff neck, etc.). If there are none, return an
-  empty array — do NOT manufacture red flags. "urgency": "emergency" = needs same-day/ED
-  attention; "urgent" = review soon; "routine" = worth noting.
+  or worsening pain, bleeding, high fever with stiff neck, etc.). Be STRICT: only list a red flag
+  that fits the body system/region actually involved. For a minor, localised complaint (e.g. a
+  simple ankle sprain, common cold, mild rash) return an EMPTY array — do NOT manufacture red
+  flags or list conditions unrelated to the presentation. Keep "action" short (<= 15 words).
+  "urgency": "emergency" = needs same-day/ED attention; "urgent" = review soon; "routine" = worth noting.
 - "missing_information": key history/exam items not yet covered that a thorough physician would
   want (brief phrases). "suggested_investigations": tests the physician could CONSIDER, each with
   a one-line rationale — never phrased as an order.
@@ -297,10 +299,12 @@ async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user))
     ]
 
     considerations = _considerations(data.get("clinical_considerations"))
-    # Ground the safety-critical red flags in the curated KB, then merge.
-    grounded = await kb_ground_red_flags(entities.get("symptoms") or [], user.token)
-    considerations = _merge_considerations(considerations, grounded)
-    # De-duplicate follow-ups against the (merged) red flags and sort by severity.
+    # Red flags come from the model's contextual reasoning only. The broad KB
+    # fuzzy-matcher (kb_ground_red_flags) was retired here — it surfaced conditions
+    # unrelated to the presentation (e.g. liver cancer for an ankle sprain). Clinical Synthesis's
+    # must-not-miss (decision-support panel) is the grounded safety net now.
+    considerations["red_flags"] = _trim_flags(considerations["red_flags"], keep=4, action_max=200)
+    # De-duplicate follow-ups against the red flags and sort by severity.
     fups = _dedupe_followups(fups, considerations["red_flags"])
 
     return {
@@ -315,6 +319,17 @@ async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user))
 _URGENCY = {"emergency", "urgent", "routine"}
 _URG_RANK = {"emergency": 0, "urgent": 1, "routine": 2}
 _SEV_RANK = {"high": 0, "moderate": 1, "low": 2}
+
+
+def _trim_flags(flags: list[dict], keep: int = 4, action_max: int = 200) -> list[dict]:
+    """Cap the number of red flags and truncate their text so the panel stays
+    scannable instead of dumping walls of text."""
+    out = []
+    for f in flags[:keep]:
+        f["action"] = (f.get("action") or "")[:action_max]
+        f["concern"] = (f.get("concern") or "")[:160]
+        out.append(f)
+    return out
 _STOP = {"about", "ask", "for", "the", "and", "any", "check", "assess", "with", "your",
          "patient", "possible", "consider", "rule", "out", "screen", "signs", "symptoms",
          "history", "this", "that", "from", "have", "been", "such", "other"}
@@ -504,12 +519,16 @@ def _live_prompt(context: str, transcript: str) -> str:
         '{\n'
         '  "translation": "a clean ENGLISH translation/paraphrase of the conversation so far (concise)",\n'
         '  "symptoms": ["key presenting symptoms mentioned so far"],\n'
-        '  "red_flags": [{"finding":"concerning symptom/sign","concern":"serious condition it could indicate",'
-        '"urgency":"emergency|urgent|routine","action":"brief suggested action"}],\n'
+        '  "red_flags": [{"finding":"the concerning symptom/sign","concern":"serious condition it could indicate",'
+        '"urgency":"emergency|urgent|routine","action":"one short suggested action (<= 12 words)"}],\n'
         '  "questions": [{"question":"a brief instruction to the doctor starting with Ask/Check/Assess",'
         '"severity":"low|moderate|high"}]\n'
         "}\n"
-        "Only include red flags genuinely supported by the transcript; empty array if none. "
+        "RED FLAGS — be strict: include ONLY genuine danger signs that actually FIT this "
+        "presentation and are supported by the transcript (e.g. chest pain, breathlessness at rest, "
+        "neuro deficits, severe/worsening pain, bleeding). If the complaint is minor/localised "
+        "(e.g. a simple ankle sprain, common cold), return an EMPTY red_flags array. Never list a "
+        "condition that doesn't match the body system involved. Keep every field short. "
         "Give 2-4 questions. Everything is physician-review-only. Do not invent facts.\n\n"
         f"PATIENT CONTEXT (may be empty):\n{context or '(none)'}\n\n"
         f"RUNNING TRANSCRIPT:\n{transcript}"
@@ -551,20 +570,83 @@ async def live(body: LiveRequest, user: CurrentUser = Depends(get_current_user))
     if len(body.transcript.strip()) < 3:
         return {"translation": "", "symptoms": [], "red_flags": [], "questions": []}
     data = await _gemini_json(_live_prompt(body.patient_context or "", body.transcript), 2048) or {}
-    symptoms = [str(x).strip() for x in (data.get("symptoms") or []) if str(x).strip()][:12]
-    # Ground the red flags in the curated KB, then merge with the model's.
+    symptoms = [str(x).strip() for x in (data.get("symptoms") or []) if str(x).strip()][:10]
+    # Contextual red flags from the model ONLY — the broad KB fuzzy-matcher
+    # surfaced irrelevant conditions (e.g. liver cancer for an ankle sprain), so
+    # it's intentionally not used in the live lane. Keep it tight: top 3, short.
     cc = _considerations({"red_flags": data.get("red_flags"), "completeness_pct": 0})
-    cc = _merge_considerations(cc, await kb_ground_red_flags(symptoms, user.token))
+    red_flags = []
+    for rf in cc["red_flags"][:3]:
+        rf["action"] = (rf.get("action") or "")[:140]
+        rf["concern"] = (rf.get("concern") or "")[:120]
+        red_flags.append(rf)
     questions = [
-        {"question": str(q.get("question", "")).strip(),
+        {"question": str(q.get("question", "")).strip()[:160],
          "severity": str(q.get("severity", "low")).strip().lower()}
         for q in (data.get("questions") or []) if isinstance(q, dict) and q.get("question")
-    ][:5]
+    ][:4]
     return {
         "translation": str(data.get("translation", "")).strip(),
         "symptoms": symptoms,
-        "red_flags": cc["red_flags"],
+        "red_flags": red_flags,
         "questions": questions,
+    }
+
+
+# --------------------------------------------------------------------- #
+# Structured encounter extraction — fills the consultation wizard fields
+# --------------------------------------------------------------------- #
+class ExtractRequest(BaseModel):
+    transcript: str
+    patient_context: str | None = None
+
+
+def _extract_prompt(context: str, transcript: str) -> str:
+    return (
+        "You are a clinical documentation assistant. From the doctor-patient consultation "
+        "transcript (which may mix Hindi and English), extract a STRUCTURED encounter in clinical "
+        "English. You are NOT a doctor; do not diagnose or prescribe. Return STRICT JSON:\n"
+        '{\n'
+        '  "chief_complaints": [{"text":"symptom in a few words","duration":"e.g. 2 days or empty"}],\n'
+        '  "hpi": "history of present illness, concise clinical prose",\n'
+        '  "past_history": "", "allergies": "", "medications": "current medications",\n'
+        '  "general_exam": "general examination findings if mentioned",\n'
+        '  "systemic_exam": "systemic examination findings if mentioned",\n'
+        '  "vitals": {"bp":"e.g. 120/80","hr":"","temp":"","spo2":"","rr":"","weight":"","height":""}\n'
+        "}\n"
+        "Only fill fields actually supported by the transcript; use empty string / empty array "
+        "otherwise. Do NOT invent findings or vitals. Keep it faithful to what was said.\n\n"
+        f"PATIENT CONTEXT (may be empty):\n{context or '(none)'}\n\n"
+        f"TRANSCRIPT:\n{transcript}"
+    )
+
+
+@router.post("/extract")
+async def extract(body: ExtractRequest, user: CurrentUser = Depends(get_current_user)):
+    empty = {"chief_complaints": [], "hpi": "", "past_history": "", "allergies": "",
+             "medications": "", "general_exam": "", "systemic_exam": "", "vitals": {}}
+    if len(body.transcript.strip()) < 3:
+        return empty
+    data = await _gemini_json(_extract_prompt(body.patient_context or "", body.transcript), 4096)
+    if not data:
+        return empty
+    cc = []
+    for c in (data.get("chief_complaints") or []):
+        if isinstance(c, dict) and c.get("text"):
+            cc.append({"text": str(c["text"]).strip()[:120], "duration": str(c.get("duration", "")).strip()[:40]})
+        elif isinstance(c, str) and c.strip():
+            cc.append({"text": c.strip()[:120], "duration": ""})
+    v = data.get("vitals") if isinstance(data.get("vitals"), dict) else {}
+    vitals = {k: str(v.get(k, "")).strip() for k in ("bp", "hr", "temp", "spo2", "rr", "weight", "height") if str(v.get(k, "")).strip()}
+    return {
+        "chief_complaints": cc[:10],
+        "hpi": str(data.get("hpi", "")).strip(),
+        "past_history": str(data.get("past_history", "")).strip(),
+        "allergies": str(data.get("allergies", "")).strip(),
+        "medications": str(data.get("medications", "")).strip(),
+        "general_exam": str(data.get("general_exam", "")).strip(),
+        "systemic_exam": str(data.get("systemic_exam", "")).strip(),
+        "vitals": vitals,
     }
 
 
@@ -583,6 +665,8 @@ class NewPatient(BaseModel):
 class SaveRequest(BaseModel):
     patient_id: str | None = None
     new_patient: NewPatient | None = None
+    visit_id: str | None = None               # set when finalising/updating a draft
+    status: str = "completed"                 # "completed" | "in_progress" (draft)
     transcript: str | None = None
     dialogue: list | None = None
     soap: dict | None = None
@@ -590,6 +674,8 @@ class SaveRequest(BaseModel):
     follow_up_questions: list | None = None
     prescription: list | None = None
     clinical_considerations: dict | None = None
+    vitals: dict | None = None
+    wizard: dict | None = None                # structured wizard state, for resuming drafts
     # Consent + physician attestation (P0 safety layer).
     consent_given: bool = False
     consent_method: str | None = None       # 'verbal' | 'written'
@@ -599,12 +685,16 @@ class SaveRequest(BaseModel):
 @router.post("/save")
 async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user)):
     h = user_headers(user.token)
+    is_draft = body.status == "in_progress"
 
-    # 0. AI-generated content is never permanent without the physician's explicit
-    #    approval. Enforce attestation server-side (not just in the UI).
-    if not body.attested:
+    # A completed note is a permanent clinical record — attestation is required.
+    # A draft (in_progress) is a work-in-progress and does not require attestation.
+    if not is_draft and not body.attested:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            "Physician attestation is required before saving a note.")
+                            "Physician attestation is required before completing a note.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    visit_status = "in_progress" if is_draft else "approved"
 
     # 1. Resolve or create the patient.
     if body.patient_id:
@@ -623,37 +713,53 @@ async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user))
     else:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide patient_id or new_patient")
 
-    # 2. Create the visit (approved) with recording consent.
-    now = datetime.now(timezone.utc).isoformat()
-    v = await rest("POST", "visits", headers=h, prefer="return=representation", json={
-        "patient_id": patient_id, "clinic_id": user.clinic_id, "doctor_id": user.user_id,
-        "status": "approved", "approved_at": now,
-        "consent_given": bool(body.consent_given),
-        "consent_at": now if body.consent_given else None,
-        "consent_method": body.consent_method if body.consent_given else None,
-    })
-    if v.status_code not in (200, 201):
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Visit create failed: {v.text[:300]}")
-    visit_id = v.json()[0]["id"]
-
-    # 3. Store the note, with considerations + the physician's attestation.
+    # The note payload (shared by create + update).
     so = body.soap or {}
-    n = await rest("POST", "soap_notes", headers=h, prefer="return=representation", json={
-        "visit_id": visit_id, "patient_id": patient_id, "clinic_id": user.clinic_id,
+    note = {
         "transcript": body.transcript, "dialogue": body.dialogue or [],
         "subjective": so.get("subjective"), "objective": so.get("objective"),
         "assessment": so.get("assessment"), "plan": so.get("plan"),
         "entities": body.entities or {}, "follow_up_questions": body.follow_up_questions or [],
         "prescription": body.prescription or [],
         "clinical_considerations": body.clinical_considerations or {},
-        "attested": True, "attested_at": now, "attested_by": user.user_id,
-        "created_by": user.user_id,
-    })
-    if n.status_code not in (200, 201):
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Note save failed: {n.text[:300]}")
+        "vitals": body.vitals or {},
+        "wizard": body.wizard or {},
+    }
+    attest = ({"attested": True, "attested_at": now, "attested_by": user.user_id}
+              if not is_draft else {"attested": False})
+    consent = ({"consent_given": True, "consent_at": now, "consent_method": body.consent_method}
+               if body.consent_given else {})
 
-    await audit(clinic_id=user.clinic_id, actor_id=user.user_id, action="save_visit",
+    # 2. Update an existing draft, or create a new visit + note.
+    if body.visit_id:
+        vp = {"status": visit_status, "approved_at": (None if is_draft else now), **consent}
+        v = await rest("PATCH", "visits", headers=h, prefer="return=representation",
+                       params={"id": f"eq.{body.visit_id}"}, json=vp)
+        if v.status_code not in (200, 204) or (v.status_code == 200 and not v.json()):
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Visit update failed: {v.text[:300]}")
+        visit_id = body.visit_id
+        n = await rest("PATCH", "soap_notes", headers=h, params={"visit_id": f"eq.{visit_id}"},
+                       json={**note, **attest})
+        if n.status_code not in (200, 204):
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Note update failed: {n.text[:300]}")
+        action = "complete_visit" if not is_draft else "update_draft"
+    else:
+        v = await rest("POST", "visits", headers=h, prefer="return=representation", json={
+            "patient_id": patient_id, "clinic_id": user.clinic_id, "doctor_id": user.user_id,
+            "status": visit_status, "approved_at": (None if is_draft else now), **consent,
+        })
+        if v.status_code not in (200, 201):
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Visit create failed: {v.text[:300]}")
+        visit_id = v.json()[0]["id"]
+        n = await rest("POST", "soap_notes", headers=h, prefer="return=representation", json={
+            "visit_id": visit_id, "patient_id": patient_id, "clinic_id": user.clinic_id,
+            "created_by": user.user_id, **note, **attest,
+        })
+        if n.status_code not in (200, 201):
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Note save failed: {n.text[:300]}")
+        action = "save_draft" if is_draft else "save_visit"
+
+    await audit(clinic_id=user.clinic_id, actor_id=user.user_id, action=action,
                 entity="visit", entity_id=visit_id,
-                after={"patient_id": patient_id, "attested_by": user.user_id,
-                       "consent_given": bool(body.consent_given)})
-    return {"visit_id": visit_id, "patient_id": patient_id}
+                after={"patient_id": patient_id, "status": visit_status})
+    return {"visit_id": visit_id, "patient_id": patient_id, "status": visit_status}

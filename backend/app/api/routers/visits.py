@@ -1,10 +1,63 @@
-"""Per-patient visit history + delete. RLS keeps everything clinic-scoped."""
+"""Per-patient visit history + clinic consultation dashboard + delete.
+RLS keeps everything clinic-scoped."""
+from datetime import date as _date
+
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..deps import CurrentUser, get_current_user
 from ...core.supabase import audit, rest, user_headers
 
 router = APIRouter()
+
+_COMPLETED = ("approved", "completed")
+
+
+@router.get("/consultations")
+async def consultations(
+    scope: str = "all", q: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Clinic-wide consultation log + headline stats (Clinical Synthesis-style dashboard)."""
+    params = {
+        "select": "id,started_at,approved_at,status,doctor_id,patient_id,"
+                  "patients(name,uhid),soap_notes(assessment,subjective)",
+        "order": "started_at.desc", "limit": "500",
+    }
+    if scope == "mine":
+        params["doctor_id"] = f"eq.{user.user_id}"
+    r = await rest("GET", "visits", headers=user_headers(user.token), params=params)
+    rows = r.json() if r.status_code == 200 else []
+
+    items = []
+    for v in rows:
+        p = v.get("patients") or {}
+        notes = v.get("soap_notes") or []
+        note = notes[0] if notes else {}
+        items.append({
+            "visit_id": v["id"],
+            "patient_id": v.get("patient_id"),
+            "patient_name": p.get("name"),
+            "uhid": p.get("uhid"),
+            "date": v.get("approved_at") or v.get("started_at"),
+            "status": v.get("status"),
+            "mine": v.get("doctor_id") == user.user_id,
+            "assessment": (note.get("assessment") or note.get("subjective") or "").strip()[:120],
+        })
+
+    today = _date.today().isoformat()
+    stats = {
+        "total": len(items),
+        "completed": sum(1 for i in items if i["status"] in _COMPLETED),
+        "in_progress": sum(1 for i in items if i["status"] == "in_progress"),
+        "today": sum(1 for i in items if i["status"] in _COMPLETED and (i["date"] or "").startswith(today)),
+    }
+
+    if q:
+        ql = q.lower()
+        items = [i for i in items if ql in (i["patient_name"] or "").lower()
+                 or ql in (i["uhid"] or "").lower() or ql in (i["assessment"] or "").lower()]
+
+    return {"items": items, "stats": stats}
 
 
 def _ents(note: dict, key: str) -> list[str]:
@@ -100,7 +153,7 @@ async def get_visit(visit_id: str, user: CurrentUser = Depends(get_current_user)
                 "select": "id,started_at,approved_at,status,patient_id,"
                           "consent_given,consent_at,consent_method,"
                           "soap_notes(transcript,dialogue,subjective,objective,assessment,plan,"
-                          "entities,follow_up_questions,prescription,clinical_considerations,"
+                          "entities,follow_up_questions,prescription,clinical_considerations,vitals,wizard,"
                           "attested,attested_at,created_at)"},
     )
     rows = r.json() if r.status_code == 200 else []
