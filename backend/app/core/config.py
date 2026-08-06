@@ -34,6 +34,27 @@ class Settings(BaseSettings):
     # App
     frontend_origin: str = "http://localhost:3000"
 
+    # Observability
+    environment: str = "development"        # development | staging | production
+    log_level: str = "INFO"
+    sentry_dsn: str = ""                     # optional; error tracking off when blank
+
+    # Rate limiting (per client IP, 60s sliding window)
+    rate_limit_enabled: bool = True
+    rate_limit_default_per_min: int = 120
+    rate_limit_ai_per_min: int = 30          # STT / LLM / decision-support routes
+
+    def configured_providers(self) -> dict:
+        """A non-secret snapshot of which capabilities are wired — for startup logs."""
+        return {
+            "environment": self.environment,
+            "stt": "openai" if self.openai_api_key else ("sarvam" if self.sarvam_api_key else "none"),
+            "llm": "gemini" if self.gemini_api_key else "none",
+            "decision_support": bool(self.synthesis_api_base),
+            "sentry": bool(self.sentry_dsn),
+            "rate_limit": self.rate_limit_enabled,
+        }
+
 
 @lru_cache
 def get_settings() -> Settings:
