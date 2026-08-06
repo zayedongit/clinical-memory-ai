@@ -17,11 +17,11 @@ function encodeWav(samples: Float32Array, sampleRate: number): Blob {
   return new Blob([view], { type: "audio/wav" });
 }
 function flatten(chunks: Float32Array[]): Float32Array { const len = chunks.reduce((a, c) => a + c.length, 0); const out = new Float32Array(len); let off = 0; for (const c of chunks) { out.set(c, off); off += c.length; } return out; }
-type Extracted = { chief_complaints: Complaint[]; hpi: string; past_history: string; allergies: string; medications: string; general_exam: string; systemic_exam: string; vitals: Record<string, string> };
+type Extracted = { chief_complaints: Complaint[]; hpi: string; past_history: string; allergies: string; medications: string; general_exam: string; systemic_exam: string; vitals: Record<string, string>; evidence?: Record<string, string> };
 
 type Patient = { id: string; name: string; uhid: string | null; gender: string | null; phone: string | null; dob: string | null; height_cm: number | null; weight_kg: number | null };
 type Vitals = { weight: string; height: string; bp_sys: string; bp_dia: string; hr: string; spo2: string; temp: string; rr: string };
-type Complaint = { text: string; duration: string };
+type Complaint = { text: string; duration: string; evidence?: string };
 type Encounter = { complaints: Complaint[]; hpi: string; past_history: string; allergies: string; medications: string; general_exam: string; systemic_exam: string };
 type Ddx = { diagnosis: string; likelihood: string; reasoning: string; icd10: string };
 type Investigation = { investigation: string; urgency: string; rationale: string; mnm_floor: boolean };
@@ -29,6 +29,11 @@ type TxDrug = { drug: string; dose: string; route: string; frequency: string; du
 type Treatment = { diagnosis: string; first_line: TxDrug[]; non_pharmacological: string[] };
 type DS = { available: boolean; differential_diagnosis: Ddx[]; must_not_miss: { diagnosis: string }[]; investigations: Investigation[]; treatment: Treatment[] };
 type RxItem = { drug: string; brand: string; dose: string; frequency: string; duration: string; route: string };
+type RedFlag = { finding: string; concern: string; urgency: string; action: string };
+type LiveQ = { question: string; severity: string };
+type Consider = { translation: string; symptoms: string[]; red_flags: RedFlag[]; questions: LiveQ[] };
+type TrendPt = { date: string; value: string };
+type Memory = { visit_count: number; problems: { label: string; count: number; first_seen: string; last_seen: string }[]; allergies: string[]; current_medications: string[]; trends: Record<string, TrendPt[]>; since_last: { new_problems?: string[]; new_medications?: string[]; stopped_medications?: string[] } };
 
 type Section = "vitals" | "complaints" | "history" | "general" | "systemic";
 const SECTIONS: { key: Section; label: string }[] = [
@@ -40,6 +45,88 @@ const urgTag: Record<string, string> = { immediate: "bg-red-600 text-white", urg
 const likeTag: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", medium: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
 
 function ageFrom(dob: string | null): string { if (!dob) return "—"; const y = new Date(dob).getFullYear(); return y ? `${new Date().getFullYear() - y}y` : "—"; }
+
+// Shows the verbatim words from the transcript that produced an AI-filled field,
+// so the doctor can verify the auto-fill at a glance (backend guarantees the quote
+// genuinely appears in the transcript).
+function EvidenceChip({ q }: { q?: string }) {
+  if (!q) return null;
+  return (
+    <p className="mt-1 flex items-start gap-1 text-[11px] text-slate-400" title="Verbatim from the transcript">
+      <span className="italic">&ldquo;{q}&rdquo;</span>
+      <span className="ml-1 shrink-0 rounded bg-slate-100 px-1 text-[9px] font-semibold uppercase tracking-wide text-slate-400">heard</span>
+    </p>
+  );
+}
+
+function _num(v: string): number { const s = String(v); return parseFloat(s.includes("/") ? s.split("/")[0] : s); }
+
+function Sparkline({ pts }: { pts: TrendPt[] }) {
+  const vals = pts.map((p) => _num(p.value)).filter((n) => !isNaN(n));
+  if (vals.length < 2) return null;
+  const w = 56, h = 16, min = Math.min(...vals), max = Math.max(...vals), span = max - min || 1, step = w / (vals.length - 1);
+  const d = vals.map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / span) * h).toFixed(1)}`).join(" ");
+  return <svg width={w} height={h} className="text-blue-500"><polyline points={d} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" /></svg>;
+}
+
+const METRIC_LABEL: Record<string, string> = { bp: "BP", hr: "HR", spo2: "SpO₂", temp: "Temp", weight: "Weight", rr: "RR", height: "Ht" };
+
+// Longitudinal memory shown automatically at the top of the consult — the doctor
+// sees the patient's story (allergies, problems, meds, trends, what changed) with
+// zero clicks. Collapsible, no input required.
+function MemoryPanel({ m, open, onToggle }: { m: Memory; open: boolean; onToggle: () => void }) {
+  const sl = m.since_last || {};
+  const changes = [
+    ...(sl.new_problems || []).map((x) => ({ t: `New: ${x}`, c: "bg-amber-100 text-amber-800" })),
+    ...(sl.new_medications || []).map((x) => ({ t: `Started: ${x}`, c: "bg-blue-100 text-blue-700" })),
+    ...(sl.stopped_medications || []).map((x) => ({ t: `Stopped: ${x}`, c: "bg-slate-100 text-slate-600" })),
+  ];
+  return (
+    <div className="mb-5 rounded-2xl border border-slate-200 bg-white/70 p-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-semibold text-slate-900">Patient memory <span className="font-normal text-slate-400">· {m.visit_count} prior visit{m.visit_count === 1 ? "" : "s"}</span></p>
+        <button onClick={onToggle} className="text-xs text-slate-400 hover:text-slate-700">{open ? "Hide" : "Show"}</button>
+      </div>
+      {m.allergies.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <span className="text-xs font-semibold text-red-600">Allergies:</span>
+          {m.allergies.map((a, i) => <span key={i} className="rounded bg-red-600 px-2 py-0.5 text-xs font-medium text-white">{a}</span>)}
+        </div>
+      )}
+      {changes.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <span className="text-xs font-medium text-slate-500">Since last visit:</span>
+          {changes.map((c, i) => <span key={i} className={`rounded px-2 py-0.5 text-xs ${c.c}`}>{c.t}</span>)}
+        </div>
+      )}
+      {open && (
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Active problems</p>
+            {m.problems.length ? <ul className="mt-1 space-y-0.5 text-sm text-slate-700">{m.problems.slice(0, 6).map((p, i) => <li key={i}>{p.label}{p.count > 1 && <span className="text-slate-400"> ×{p.count}</span>}</li>)}</ul> : <p className="mt-1 text-sm text-slate-400">—</p>}
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Current medications</p>
+            {m.current_medications.length ? <ul className="mt-1 space-y-0.5 text-sm text-slate-700">{m.current_medications.slice(0, 6).map((x, i) => <li key={i}>{x}</li>)}</ul> : <p className="mt-1 text-sm text-slate-400">—</p>}
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Trends</p>
+            <div className="mt-1 space-y-1">
+              {Object.entries(m.trends).filter(([, pts]) => pts.length >= 2).slice(0, 4).map(([k, pts]) => (
+                <div key={k} className="flex items-center gap-2 text-xs">
+                  <span className="w-12 shrink-0 text-slate-500">{METRIC_LABEL[k] || k}</span>
+                  <Sparkline pts={pts} />
+                  <span className="text-slate-800">{pts[pts.length - 1].value}</span>
+                </div>
+              ))}
+              {Object.values(m.trends).every((p) => p.length < 2) && <p className="text-sm text-slate-400">Not enough data yet</p>}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function ConsultWizard() {
   const router = useRouter();
@@ -67,6 +154,14 @@ export default function ConsultWizard() {
   const [scribeOpen, setScribeOpen] = useState(false);
   const [draftVisitId, setDraftVisitId] = useState<string | null>(null);
   const [draftSaved, setDraftSaved] = useState(false);
+  const [evidence, setEvidence] = useState<Record<string, string>>({});
+  const [dsFailed, setDsFailed] = useState<"unavailable" | "error" | null>(null);
+  const [gate, setGate] = useState<{ kind: string; label: string }[] | null>(null);
+  const [gateReason, setGateReason] = useState("");
+  const [memory, setMemory] = useState<Memory | null>(null);
+  const [memoryOpen, setMemoryOpen] = useState(true);
+  const [liveMode, setLiveMode] = useState(true);           // fresh consults open in live mode (the main flow)
+  const [liveConsider, setLiveConsider] = useState<Consider>({ translation: "", symptoms: [], red_flags: [], questions: [] });
 
   function applyExtract(ex: Extracted) {
     setEnc((e) => ({
@@ -82,8 +177,43 @@ export default function ConsultWizard() {
       for (const k of ["hr", "temp", "spo2", "rr", "weight", "height"] as const) if (mv[k]) (n as Record<string, string>)[k] = mv[k];
       return n;
     });
+    setEvidence(ex.evidence || {});
     setScribeOpen(false); setSection("complaints");
   }
+
+  // Live-mode merge: non-destructive, runs repeatedly as the transcript grows.
+  // Latest non-empty AI value fills each field; complaints accumulate by unique text.
+  function liveMerge(ex: Extracted) {
+    setEnc((e) => {
+      const seen = new Set(e.complaints.map((c) => c.text.toLowerCase()));
+      const merged = [...e.complaints];
+      for (const c of (ex.chief_complaints || [])) if (c.text && !seen.has(c.text.toLowerCase())) merged.push(c);
+      return {
+        complaints: merged,
+        hpi: ex.hpi || e.hpi, past_history: ex.past_history || e.past_history,
+        allergies: ex.allergies || e.allergies, medications: ex.medications || e.medications,
+        general_exam: ex.general_exam || e.general_exam, systemic_exam: ex.systemic_exam || e.systemic_exam,
+      };
+    });
+    setVitals((v) => {
+      const n = { ...v }; const mv = ex.vitals || {};
+      if (mv.bp) { const [s, d] = mv.bp.split("/"); if (s) n.bp_sys = s.trim(); if (d) n.bp_dia = d.trim(); }
+      for (const k of ["hr", "temp", "spo2", "rr", "weight", "height"] as const) if (mv[k]) (n as Record<string, string>)[k] = mv[k];
+      return n;
+    });
+    setEvidence((prev) => ({ ...prev, ...(ex.evidence || {}) }));
+  }
+
+  // Short, history-aware context handed to the live lanes so suggestions reflect
+  // the patient's own record — not just today's words.
+  const patientContext = useMemo(() => {
+    if (!memory) return "";
+    return [
+      memory.allergies.length ? `Allergies: ${memory.allergies.join(", ")}` : "",
+      memory.problems.length ? `Known problems: ${memory.problems.map((p) => p.label).join(", ")}` : "",
+      memory.current_medications.length ? `Current meds: ${memory.current_medications.join(", ")}` : "",
+    ].filter(Boolean).join(". ");
+  }, [memory]);
 
   useEffect(() => {
     (async () => {
@@ -100,6 +230,14 @@ export default function ConsultWizard() {
   async function attach(pid: string) {
     const r = await apiGet(`/patients/${pid}`);
     if (r.ok) { const p = await r.json(); setPatient(p); setVitals((v) => ({ ...v, weight: p.weight_kg ? String(p.weight_kg) : v.weight, height: p.height_cm ? String(p.height_cm) : v.height })); }
+    loadMemory(pid);
+  }
+
+  async function loadMemory(pid: string) {
+    const r = await apiGet(`/patients/${pid}/memory`);
+    if (!r.ok) return;
+    const m: Memory = await r.json();
+    if (m.visit_count > 0 || m.allergies.length || m.problems.length) setMemory(m);
   }
 
   const bmi = useMemo(() => { const w = parseFloat(vitals.weight), h = parseFloat(vitals.height); return w && h ? (w / ((h / 100) ** 2)).toFixed(1) : ""; }, [vitals.weight, vitals.height]);
@@ -112,17 +250,62 @@ export default function ConsultWizard() {
   function addComplaint() { if (!cText.trim()) return; setEnc({ ...enc, complaints: [...enc.complaints, { text: cText.trim(), duration: cDur.trim() }] }); setCText(""); setCDur(""); }
   function cleanVitals(): Record<string, string> { const o: Record<string, string> = {}; if (vitals.bp_sys || vitals.bp_dia) o.bp = `${vitals.bp_sys}/${vitals.bp_dia}`; if (vitals.hr) o.hr = vitals.hr; if (vitals.temp) o.temp = vitals.temp; if (vitals.spo2) o.spo2 = vitals.spo2; if (vitals.rr) o.rr = vitals.rr; return o; }
 
-  async function goToPrescription() {
-    setStep(2); setSub("dx"); setErr(null);
-    if (ds || enc.complaints.length === 0) return;
-    setDsBusy("Analysing with Clinical Synthesis…");
+  // Flag vitals outside a safe range (critical values the doctor should not miss).
+  function vitalFlags(): string[] {
+    const out: string[] = [];
+    const chk = (name: string, val: string, lo: number, hi: number, unit = "") => {
+      const n = parseFloat(val); if (isNaN(n)) return;
+      if (n < lo || n > hi) out.push(`${name} ${val}${unit} is outside the safe range (${lo}–${hi}${unit})`);
+    };
+    chk("BP systolic", vitals.bp_sys, 90, 180);
+    chk("BP diastolic", vitals.bp_dia, 50, 110);
+    chk("Heart rate", vitals.hr, 45, 130, " bpm");
+    chk("SpO₂", vitals.spo2, 92, 100, "%");
+    chk("Temperature", vitals.temp, 95, 103, "°F");
+    chk("Respiratory rate", vitals.rr, 8, 30, "/min");
+    return out;
+  }
+
+  // Completeness gate: safety issues the physician must acknowledge before signing.
+  function computeWarnings(): { kind: string; label: string }[] {
+    const w: { kind: string; label: string }[] = [];
+    if (ds?.must_not_miss?.length) {
+      const floorOrdered = [...selIx].some((i) => ds.investigations[i]?.mnm_floor);
+      if (!floorOrdered)
+        w.push({ kind: "red_flag", label: `Must-not-miss raised — confirm considered: ${ds.must_not_miss.map((m) => m.diagnosis).join(", ")}` });
+    }
+    (ds?.investigations || []).forEach((iv, i) => {
+      const urgent = ["immediate", "urgent"].includes(iv.urgency.toLowerCase()) || iv.mnm_floor;
+      if (urgent && !selIx.has(i)) w.push({ kind: "missing_investigation", label: `${iv.urgency} investigation not ordered: ${iv.investigation}` });
+    });
+    const allergy = enc.allergies.toLowerCase().trim();
+    if (allergy) {
+      const tokens = allergy.split(/[,;/]+|\band\b/).map((t) => t.trim()).filter((t) => t.length > 2);
+      rx.forEach((r) => {
+        const hay = `${r.drug} ${r.brand}`.toLowerCase();
+        tokens.forEach((t) => { if (hay.includes(t)) w.push({ kind: "allergy_conflict", label: `Possible allergy conflict: ${r.brand || r.drug} vs noted allergy "${t}"` }); });
+      });
+    }
+    vitalFlags().forEach((label) => w.push({ kind: "vitals", label }));
+    return w;
+  }
+
+  async function runDecisionSupport() {
+    if (enc.complaints.length === 0) return;
+    setDsBusy("Analysing with Clinical Synthesis…"); setDsFailed(null);
     const r = await apiPost("/synthesis/decision-support", {
       chief_complaints: enc.complaints.map((c) => c.text), age: ageFrom(patient?.dob ?? null).replace("y", ""),
       gender: patient?.gender || undefined, patient_weight: vitals.weight || undefined, vitals: cleanVitals(),
     });
     setDsBusy(null);
-    if (r.ok) { const d = await r.json(); setDs(d); if (!d.available) setErr("Clinical Synthesis decision support is unavailable right now."); }
-    else setErr("Couldn't reach decision support.");
+    if (r.ok) { const d = await r.json(); setDs(d); setDsFailed(d.available ? null : "unavailable"); }
+    else { setDs(null); setDsFailed("error"); }
+  }
+
+  async function goToPrescription() {
+    setStep(2); setSub("dx"); setErr(null);
+    if (ds || enc.complaints.length === 0) return;
+    await runDecisionSupport();
   }
 
   async function confirmDx() {
@@ -149,7 +332,9 @@ export default function ConsultWizard() {
       entities: { symptoms: enc.complaints.map((c) => c.text), allergies: enc.allergies ? [enc.allergies] : [], diagnoses: primaryDx ? [primaryDx.diagnosis] : [] },
       prescription: rx.map((r) => ({ brand: r.brand || r.drug, generic: r.drug, strength: r.dose || null, form: null, dose: r.dose, frequency: r.frequency, duration: r.duration, instructions: r.route ? `Route: ${r.route}` : "" })),
       vitals: cleanVitals(),
-      wizard: { step, section, enc, vitals, ds, sub, primaryDx, selIx: [...selIx], rx },
+      clinical_considerations: { red_flags: liveConsider.red_flags },
+      follow_up_questions: liveConsider.questions,
+      wizard: { step, section, enc, vitals, ds, sub, primaryDx, selIx: [...selIx], rx, liveConsider },
     };
   }
 
@@ -158,6 +343,7 @@ export default function ConsultWizard() {
     if (!r.ok) return;
     const v = await r.json();
     setDraftVisitId(vid);
+    setLiveMode(false);                       // resuming saved work → manual wizard, not live
     if (v.patient_id) await attach(v.patient_id);
     const w = v.note?.wizard;
     if (w && Object.keys(w).length) {
@@ -167,6 +353,7 @@ export default function ConsultWizard() {
       if (w.primaryDx) setPrimaryDx(w.primaryDx);
       if (Array.isArray(w.selIx)) setSelIx(new Set(w.selIx));
       if (Array.isArray(w.rx)) setRx(w.rx);
+      if (w.liveConsider) setLiveConsider(w.liveConsider);
       if (w.section) setSection(w.section);
       if (w.sub) setSub(w.sub);
       if (w.step) setStep(w.step);
@@ -185,12 +372,24 @@ export default function ConsultWizard() {
   async function save() {
     if (!patient) { setErr("No patient attached."); return; }
     if (!attested) { setErr("Please attest the note to sign it."); return; }
+    const warnings = computeWarnings();
+    if (warnings.length) { setGate(warnings); setGateReason(""); return; }   // open completeness gate
+    await doSave([], "");
+  }
+
+  async function doSave(warnings: { kind: string; label: string }[], reason: string) {
+    if (!patient) return;
     setSaving(true); setErr(null);
+    const sign_off = {
+      warnings,
+      overrides: reason ? warnings.map((w) => ({ ...w, reason })) : [],
+      passed: warnings.length === 0,
+    };
     const r = await apiPost("/scribe/save", {
       patient_id: patient.id, visit_id: draftVisitId ?? undefined, status: "completed", attested: true,
-      consent_given: true, consent_method: "verbal", ...composeNote(),
+      consent_given: true, consent_method: "verbal", sign_off, ...composeNote(),
     });
-    setSaving(false);
+    setSaving(false); setGate(null);
     if (!r.ok) { setErr(`Save failed (${r.status}).`); return; }
     setSaved((await r.json()).visit_id);
   }
@@ -217,7 +416,8 @@ export default function ConsultWizard() {
         <div><h1 className="text-2xl font-semibold tracking-tight text-slate-900">Clinical Consultation</h1>
           <p className="text-sm text-slate-500">Structured clinical note + prescription builder</p></div>
         <div className="flex items-center gap-3 text-sm">
-          <button onClick={() => setScribeOpen(true)} className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-1.5 font-medium text-white hover:bg-emerald-500">◉ Scribe</button>
+          {step === 1 && !liveMode && <button onClick={() => setLiveMode(true)} className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-1.5 font-medium text-white hover:bg-emerald-500">● Live consultation</button>}
+          {!liveMode && <button onClick={() => setScribeOpen(true)} className="rounded-xl border border-slate-200 px-3 py-1.5 text-slate-600 hover:bg-slate-50">◉ Scribe</button>}
           <button onClick={saveDraft} disabled={saving} className="rounded-xl border border-slate-200 px-3 py-1.5 text-slate-600 hover:bg-slate-50 disabled:opacity-40">Save draft</button>
           {draftSaved && <span className="text-xs text-emerald-600">Saved ✓</span>}
           <Link href="/consultations" className="text-slate-500 hover:text-slate-900">Consultations</Link>
@@ -234,7 +434,19 @@ export default function ConsultWizard() {
 
       {err && <p className="mb-4 text-sm text-red-600">{err}</p>}
 
-      {step === 1 && (
+      {step === 1 && memory && <MemoryPanel m={memory} open={memoryOpen} onToggle={() => setMemoryOpen((o) => !o)} />}
+
+      {step === 1 && liveMode && (
+        <LiveConsult
+          patientContext={patientContext}
+          enc={enc} vitals={vitals} bmi={bmi} consider={liveConsider}
+          onExtract={liveMerge} onConsider={setLiveConsider}
+          onManual={() => setLiveMode(false)}
+          onFinish={() => setLiveMode(false)}
+        />
+      )}
+
+      {step === 1 && !liveMode && (
         <div className="grid gap-4 md:grid-cols-[220px_1fr]">
           <nav className="glass h-fit rounded-2xl p-2">
             <p className="px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">Encounter</p>
@@ -259,6 +471,12 @@ export default function ConsultWizard() {
                 <Field label="Temp (°F)" v={vitals.temp} on={(x) => setVitals({ ...vitals, temp: x })} ph="97–99.5" />
                 <Field label="RR (/min)" v={vitals.rr} on={(x) => setVitals({ ...vitals, rr: x })} ph="12–20" />
               </div>
+              {vitalFlags().length > 0 && (
+                <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+                  <p className="text-xs font-semibold text-amber-800">⚠ Vitals outside safe range — please double-check</p>
+                  <ul className="mt-1 list-disc pl-5 text-xs text-amber-700">{vitalFlags().map((f, i) => <li key={i}>{f}</li>)}</ul>
+                </div>
+              )}
               <Advance onClick={() => setSection("complaints")} label="Continue to Chief Complaints" /></div>)}
 
             {section === "complaints" && (<div><SectionHead title="Chief Complaints" />
@@ -269,25 +487,34 @@ export default function ConsultWizard() {
               </div>
               {enc.complaints.length === 0 ? <p className="text-sm text-slate-400">No complaints yet.</p> : (
                 <ul className="space-y-1.5">{enc.complaints.map((c, i) => (
-                  <li key={i} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm">
-                    <span className="text-slate-800">{c.text}{c.duration && <span className="text-slate-400"> · {c.duration}</span>}</span>
-                    <button onClick={() => setEnc({ ...enc, complaints: enc.complaints.filter((_, idx) => idx !== i) })} className="text-xs text-slate-400 hover:text-red-600">Remove</button>
+                  <li key={i} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-800">{c.text}{c.duration && <span className="text-slate-400"> · {c.duration}</span>}</span>
+                      <button onClick={() => setEnc({ ...enc, complaints: enc.complaints.filter((_, idx) => idx !== i) })} className="text-xs text-slate-400 hover:text-red-600">Remove</button>
+                    </div>
+                    <EvidenceChip q={c.evidence} />
                   </li>))}</ul>)}
               <Advance onClick={() => setSection("history")} label="Continue to History" /></div>)}
 
             {section === "history" && (<div><SectionHead title="History" />
               <Area label="History of present illness" v={enc.hpi} on={(x) => setEnc({ ...enc, hpi: x })} />
+              <EvidenceChip q={evidence.hpi} />
               <Area label="Past history" v={enc.past_history} on={(x) => setEnc({ ...enc, past_history: x })} />
+              <EvidenceChip q={evidence.past_history} />
               <Area label="Allergies" v={enc.allergies} on={(x) => setEnc({ ...enc, allergies: x })} />
+              <EvidenceChip q={evidence.allergies} />
               <Area label="Current medications" v={enc.medications} on={(x) => setEnc({ ...enc, medications: x })} />
+              <EvidenceChip q={evidence.medications} />
               <Advance onClick={() => setSection("general")} label="Continue to Examination" /></div>)}
 
             {section === "general" && (<div><SectionHead title="General Examination" />
               <Area label="General examination findings" v={enc.general_exam} on={(x) => setEnc({ ...enc, general_exam: x })} rows={5} />
+              <EvidenceChip q={evidence.general_exam} />
               <Advance onClick={() => setSection("systemic")} label="Continue to Systemic Examination" /></div>)}
 
             {section === "systemic" && (<div><SectionHead title="Systemic Examination" />
               <Area label="Systemic examination findings" v={enc.systemic_exam} on={(x) => setEnc({ ...enc, systemic_exam: x })} rows={5} />
+              <EvidenceChip q={evidence.systemic_exam} />
               <div className="mt-4 flex justify-end"><button onClick={goToPrescription} className="btn-primary">Continue to Prescription →</button></div></div>)}
           </section>
         </div>
@@ -302,7 +529,17 @@ export default function ConsultWizard() {
             {dsBusy && <span className="text-slate-400">{dsBusy}</span>}
           </div>
 
-          {!ds && !dsBusy && <p className="glass rounded-2xl p-6 text-sm text-slate-400">Add at least one chief complaint in Step 1 to generate the differential.</p>}
+          {dsFailed && !dsBusy && (
+            <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+              <p className="font-semibold">Decision support is {dsFailed === "unavailable" ? "unavailable right now" : "unreachable"}.</p>
+              <p className="mt-1 text-xs text-amber-700">
+                No differential, investigations, or treatment suggestions were generated. This does <strong>not</strong> mean there is nothing to consider — use your own clinical judgement, or{" "}
+                <button onClick={runDecisionSupport} className="underline">retry</button>. You can still complete and sign the note.
+              </p>
+            </div>
+          )}
+
+          {!ds && !dsBusy && !dsFailed && <p className="glass rounded-2xl p-6 text-sm text-slate-400">Add at least one chief complaint in Step 1 to generate the differential.</p>}
 
           {sub === "dx" && ds && (
             <div className="glass rounded-2xl p-5">
@@ -397,6 +634,28 @@ export default function ConsultWizard() {
           </div>
         </div>
       )}
+
+      {gate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-xl">
+            <p className="text-base font-semibold text-slate-900">Before you sign — {gate.length} item{gate.length > 1 ? "s" : ""} to confirm</p>
+            <p className="mt-1 text-xs text-slate-500">These are safety checks, not blockers. Resolve them, or record why you&apos;re signing anyway — your reason is saved to the record.</p>
+            <ul className="mt-3 space-y-1.5">
+              {gate.map((w, i) => (
+                <li key={i} className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <span className="mt-0.5 shrink-0 rounded bg-amber-200 px-1 text-[9px] font-bold uppercase text-amber-900">{w.kind.replace(/_/g, " ")}</span>
+                  <span>{w.label}</span>
+                </li>
+              ))}
+            </ul>
+            <textarea value={gateReason} onChange={(e) => setGateReason(e.target.value)} rows={2} placeholder="Reason for signing despite the above (required to override)…" className="field mt-3 w-full" />
+            <div className="mt-4 flex justify-end gap-2">
+              <button onClick={() => setGate(null)} className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600">Go back &amp; fix</button>
+              <button onClick={() => doSave(gate, gateReason)} disabled={saving || !gateReason.trim()} className="rounded-xl bg-amber-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40">{saving ? "Saving…" : "Override &amp; sign"}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -483,6 +742,229 @@ function RegistrationForm({ onDone }: { onDone: (id: string) => void }) {
       </div>
       {err && <p className="mt-3 text-sm text-red-600">{err}</p>}
       <button onClick={submit} disabled={busy} className="btn-primary mt-4 w-full disabled:opacity-40">{busy ? "Registering…" : "Register & Start Consultation →"}</button>
+    </div>
+  );
+}
+
+const URG_RF: Record<string, string> = { emergency: "border-red-300 bg-red-50 text-red-800", urgent: "border-amber-300 bg-amber-50 text-amber-800", routine: "border-slate-200 bg-slate-50 text-slate-700" };
+const SEV_Q: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
+
+// Bottom voice waveform — bars driven by live mic level.
+function Waveform({ level, active }: { level: number; active: boolean }) {
+  const bars = 28;
+  return (
+    <div className="flex h-10 items-center justify-center gap-[3px]">
+      {Array.from({ length: bars }).map((_, i) => {
+        const phase = Math.sin((i / bars) * Math.PI);          // taller in the middle
+        const h = active ? Math.max(3, phase * level * 38 + Math.random() * 6) : 3;
+        return <span key={i} className={`w-[3px] rounded-full ${active ? "bg-emerald-500" : "bg-slate-300"}`} style={{ height: `${h}px`, transition: "height 120ms ease" }} />;
+      })}
+    </div>
+  );
+}
+
+// The primary consultation experience: doctor talks, the note fills itself on the
+// left, and live assistance (follow-ups + red flags) refreshes on the right.
+function LiveConsult({ patientContext, enc, vitals, bmi, consider, onExtract, onConsider, onManual, onFinish }: {
+  patientContext: string; enc: Encounter; vitals: Vitals; bmi: string; consider: Consider;
+  onExtract: (ex: Extracted) => void; onConsider: (c: Consider) => void; onManual: () => void; onFinish: () => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [consent, setConsent] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [status, setStatus] = useState("Ready when you are");
+  const [transcript, setTranscript] = useState("");
+  const [level, setLevel] = useState(0);
+  const [err, setErr] = useState<string | null>(null);
+
+  const ctxRef = useRef<AudioContext | null>(null);
+  const procRef = useRef<ScriptProcessorNode | null>(null);
+  const srcRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Float32Array[]>([]);
+  const rateRef = useRef(48000);
+  const sentRef = useRef(0); const rawRef = useRef(""); const procFlagRef = useRef(false);
+  const analyzedAtRef = useRef(0); const analyzingRef = useRef(false);
+  const transcribeRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const levelRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const cleanup = () => {
+    [transcribeRef, timerRef, levelRef].forEach((r) => { if (r.current) clearInterval(r.current); });
+    procRef.current?.disconnect(); srcRef.current?.disconnect(); analyserRef.current?.disconnect();
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    ctxRef.current?.close().catch(() => {});
+  };
+  useEffect(() => cleanup, []);
+
+  async function start() {
+    if (!consent) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); streamRef.current = stream;
+      const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AC(); ctxRef.current = ctx; rateRef.current = ctx.sampleRate;
+      const src = ctx.createMediaStreamSource(stream); srcRef.current = src;
+      const proc = ctx.createScriptProcessor(4096, 1, 1); procRef.current = proc;
+      const analyser = ctx.createAnalyser(); analyser.fftSize = 256; analyserRef.current = analyser; src.connect(analyser);
+      chunksRef.current = []; sentRef.current = 0; rawRef.current = ""; analyzedAtRef.current = 0;
+      proc.onaudioprocess = (e) => chunksRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      const mute = ctx.createGain(); mute.gain.value = 0; src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+      setRecording(true); setStatus("Listening…"); setElapsed(0); setErr(null);
+      timerRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
+      transcribeRef.current = setInterval(() => { void tick(false); }, 12000);
+      const buf = new Uint8Array(analyser.frequencyBinCount);
+      levelRef.current = setInterval(() => {
+        analyser.getByteFrequencyData(buf);
+        setLevel(Math.min(1, (buf.reduce((a, b) => a + b, 0) / buf.length) / 90));
+      }, 120);
+    } catch { setErr("Microphone access denied or unavailable."); }
+  }
+
+  async function tick(final: boolean) {
+    if (procFlagRef.current) return;
+    const all = flatten(chunksRef.current); const newCount = all.length - sentRef.current;
+    if (newCount < rateRef.current * (final ? 0.5 : 5) && !final) return;
+    procFlagRef.current = true;
+    try {
+      if (newCount > 0) {
+        const slice = new Float32Array(all.subarray(sentRef.current)); sentRef.current = all.length;
+        const form = new FormData(); form.append("file", encodeWav(slice, rateRef.current), "scribe.wav");
+        const r = await apiUpload("/scribe/transcribe", form);
+        if (r.ok) { const t = ((await r.json()).transcript || "").trim(); if (t) { rawRef.current = (rawRef.current + " " + t).trim(); setTranscript(rawRef.current); } }
+      }
+    } finally { procFlagRef.current = false; }
+    // Refresh the note + assistant once enough new speech has accumulated.
+    if (final || rawRef.current.length - analyzedAtRef.current >= 40) void analyze();
+  }
+
+  async function analyze() {
+    if (analyzingRef.current || rawRef.current.trim().length < 3) return;
+    analyzingRef.current = true; analyzedAtRef.current = rawRef.current.length; setStatus("Updating note…");
+    try {
+      const [ex, lv] = await Promise.all([
+        apiPost("/scribe/extract", { transcript: rawRef.current, patient_context: patientContext }),
+        apiPost("/scribe/live", { transcript: rawRef.current, patient_context: patientContext }),
+      ]);
+      if (ex.ok) onExtract(await ex.json());
+      if (lv.ok) onConsider(await lv.json());
+    } finally { analyzingRef.current = false; if (recording) setStatus("Listening…"); }
+  }
+
+  async function finish() {
+    setStatus("Finishing…");
+    [transcribeRef, timerRef, levelRef].forEach((r) => { if (r.current) clearInterval(r.current); });
+    setRecording(false);
+    await tick(true);
+    await analyze();
+    cleanup();
+    onFinish();
+  }
+
+  const mm = String(Math.floor(elapsed / 60)).padStart(2, "0"), ss = String(elapsed % 60).padStart(2, "0");
+  const vSummary = [vitals.bp_sys && `BP ${vitals.bp_sys}/${vitals.bp_dia}`, vitals.hr && `HR ${vitals.hr}`, vitals.spo2 && `SpO₂ ${vitals.spo2}`, vitals.temp && `Temp ${vitals.temp}`, bmi && `BMI ${bmi}`].filter(Boolean).join("  ·  ");
+
+  return (
+    <div className="space-y-4">
+      {!recording && elapsed === 0 ? (
+        <div className="glass rounded-2xl p-6 text-center">
+          <p className="text-lg font-semibold text-slate-900">Start the live consultation</p>
+          <p className="mt-1 text-sm text-slate-500">Just talk to your patient. The note fills itself on the left; suggestions appear on the right.</p>
+          <label className="mx-auto mt-4 flex max-w-md items-start gap-2.5 rounded-xl bg-amber-50/70 p-3 text-left">
+            <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 h-4 w-4 accent-amber-600" />
+            <span className="text-xs text-slate-700"><span className="font-semibold text-amber-800">Recording consent.</span> The patient has been informed and consents to recording this consultation for documentation.</span>
+          </label>
+          {err && <p className="mt-2 text-sm text-red-600">{err}</p>}
+          <div className="mt-4 flex items-center justify-center gap-3">
+            <button onClick={start} disabled={!consent} className="btn-primary disabled:opacity-40">● Start live consultation</button>
+            <button onClick={onManual} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600">Type manually instead</button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
+            {/* LEFT — the note, filling itself */}
+            <section className="glass rounded-2xl p-5">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-800">Consultation note <span className="font-normal text-slate-400">· filling live</span></h2>
+                <span className="text-xs text-slate-400">{status}</span>
+              </div>
+              <div className="space-y-3 text-sm">
+                <LiveField label="Vitals" value={vSummary} />
+                <LiveField label="Chief complaints" value={enc.complaints.map((c) => `${c.text}${c.duration ? ` (${c.duration})` : ""}`).join("; ")} />
+                <LiveField label="History of present illness" value={enc.hpi} />
+                <LiveField label="Past history" value={enc.past_history} />
+                <LiveField label="Allergies" value={enc.allergies} danger />
+                <LiveField label="Current medications" value={enc.medications} />
+                <LiveField label="Examination" value={[enc.general_exam, enc.systemic_exam].filter(Boolean).join(" · ")} />
+              </div>
+            </section>
+
+            {/* RIGHT — live assistant */}
+            <aside className="glass h-fit rounded-2xl p-4">
+              <h2 className="text-sm font-semibold text-slate-800">Live assistance <span className="font-normal text-slate-400">· physician-review-only</span></h2>
+              {consider.red_flags.length > 0 && (
+                <div className="mt-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-red-500">Red flags to consider</p>
+                  <ul className="mt-1 space-y-1.5">
+                    {consider.red_flags.map((rf, i) => (
+                      <li key={i} className={`rounded-lg border p-2 text-xs ${URG_RF[rf.urgency?.toLowerCase()] || URG_RF.routine}`}>
+                        <span className="font-semibold">{rf.finding}</span>{rf.concern && <span> — {rf.concern}</span>}{rf.action && <div className="mt-0.5 font-medium">→ {rf.action}</div>}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="mt-3">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Suggested questions</p>
+                {consider.questions.length ? (
+                  <ul className="mt-1 space-y-1">
+                    {consider.questions.map((q, i) => (
+                      <li key={i} className="flex items-start gap-1.5 text-xs text-slate-700">
+                        <span className={`mt-0.5 shrink-0 rounded px-1 text-[9px] font-bold uppercase ${SEV_Q[q.severity] || SEV_Q.low}`}>{q.severity}</span>{q.question}
+                      </li>
+                    ))}
+                  </ul>
+                ) : <p className="mt-1 text-xs text-slate-400">Listening for context…</p>}
+              </div>
+              {consider.symptoms.length > 0 && (
+                <div className="mt-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Heard so far</p>
+                  <div className="mt-1 flex flex-wrap gap-1">{consider.symptoms.map((s, i) => <span key={i} className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600">{s}</span>)}</div>
+                </div>
+              )}
+            </aside>
+          </div>
+
+          {/* BOTTOM — waveform + controls */}
+          <div className="glass sticky bottom-3 z-10 flex flex-wrap items-center justify-between gap-3 rounded-2xl px-5 py-3">
+            <div className="flex items-center gap-3">
+              <span className={`flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium ${recording ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-500"}`}>{recording ? "● REC" : "❚❚ Paused"} {mm}:{ss}</span>
+              <button onClick={onManual} className="text-xs text-slate-400 hover:text-slate-700">Manual entry</button>
+            </div>
+            <Waveform level={level} active={recording} />
+            <div className="flex items-center gap-2">
+              {recording
+                ? <button onClick={finish} className="rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white">■ Finish &amp; review</button>
+                : <>
+                    <button onClick={start} disabled={!consent} className="btn-primary disabled:opacity-40">● Resume</button>
+                    <button onClick={onFinish} className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600">Review →</button>
+                  </>}
+            </div>
+          </div>
+          {err && <p className="text-sm text-red-600">{err}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+function LiveField({ label, value, danger }: { label: string; value: string; danger?: boolean }) {
+  return (
+    <div className="border-b border-slate-100 pb-2 last:border-0">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
+      {value ? <p className={`whitespace-pre-wrap text-sm ${danger ? "font-medium text-red-700" : "text-slate-700"}`}>{value}</p>
+             : <p className="text-sm italic text-slate-300">—</p>}
     </div>
   );
 }

@@ -48,6 +48,7 @@ dependencies = [
     { name = "openpyxl" },
     { name = "psycopg2-binary" },
     { name = "pydantic-settings" },
+    { name = "sentry-sdk" },
 ]
 
 [package.dev-dependencies]
@@ -63,6 +64,7 @@ requires-dist = [
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "psycopg2-binary", specifier = ">=2.9.10" },
     { name = "pydantic-settings", specifier = ">=2.8.1" },
+    { name = "sentry-sdk", specifier = ">=2.63.0" },
 ]
 
 [package.metadata.requires-dev]

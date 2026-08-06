@@ -607,37 +607,59 @@ def _extract_prompt(context: str, transcript: str) -> str:
         "transcript (which may mix Hindi and English), extract a STRUCTURED encounter in clinical "
         "English. You are NOT a doctor; do not diagnose or prescribe. Return STRICT JSON:\n"
         '{\n'
-        '  "chief_complaints": [{"text":"symptom in a few words","duration":"e.g. 2 days or empty"}],\n'
+        '  "chief_complaints": [{"text":"symptom in a few words","duration":"e.g. 2 days or empty",'
+        '"evidence":"the VERBATIM words from the transcript that support this, copied exactly"}],\n'
         '  "hpi": "history of present illness, concise clinical prose",\n'
         '  "past_history": "", "allergies": "", "medications": "current medications",\n'
         '  "general_exam": "general examination findings if mentioned",\n'
         '  "systemic_exam": "systemic examination findings if mentioned",\n'
-        '  "vitals": {"bp":"e.g. 120/80","hr":"","temp":"","spo2":"","rr":"","weight":"","height":""}\n'
+        '  "vitals": {"bp":"e.g. 120/80","hr":"","temp":"","spo2":"","rr":"","weight":"","height":""},\n'
+        '  "evidence": {"hpi":"verbatim quote","past_history":"","allergies":"","medications":"",'
+        '"general_exam":"","systemic_exam":"","vitals":"verbatim quote for the vitals"}\n'
         "}\n"
         "Only fill fields actually supported by the transcript; use empty string / empty array "
-        "otherwise. Do NOT invent findings or vitals. Keep it faithful to what was said.\n\n"
+        "otherwise. Do NOT invent findings or vitals. Every 'evidence' value MUST be text copied "
+        "word-for-word from the transcript (not paraphrased) so the doctor can verify it. Keep it "
+        "faithful to what was said.\n\n"
         f"PATIENT CONTEXT (may be empty):\n{context or '(none)'}\n\n"
         f"TRANSCRIPT:\n{transcript}"
     )
 
 
+def _verify_quote(quote: str, haystack: str) -> str:
+    """Return the quote only if it genuinely appears in the transcript (loose,
+    whitespace-insensitive match). Drops hallucinated citations so a shown quote
+    is always real evidence the doctor can trust."""
+    q = " ".join(str(quote or "").split()).strip()
+    if len(q) < 4:
+        return ""
+    return q if q.lower() in " ".join(haystack.split()).lower() else ""
+
+
 @router.post("/extract")
 async def extract(body: ExtractRequest, user: CurrentUser = Depends(get_current_user)):
     empty = {"chief_complaints": [], "hpi": "", "past_history": "", "allergies": "",
-             "medications": "", "general_exam": "", "systemic_exam": "", "vitals": {}}
+             "medications": "", "general_exam": "", "systemic_exam": "", "vitals": {}, "evidence": {}}
     if len(body.transcript.strip()) < 3:
         return empty
     data = await _gemini_json(_extract_prompt(body.patient_context or "", body.transcript), 4096)
     if not data:
         return empty
+    tx = body.transcript
     cc = []
     for c in (data.get("chief_complaints") or []):
         if isinstance(c, dict) and c.get("text"):
-            cc.append({"text": str(c["text"]).strip()[:120], "duration": str(c.get("duration", "")).strip()[:40]})
+            cc.append({"text": str(c["text"]).strip()[:120],
+                       "duration": str(c.get("duration", "")).strip()[:40],
+                       "evidence": _verify_quote(c.get("evidence", ""), tx)[:200]})
         elif isinstance(c, str) and c.strip():
-            cc.append({"text": c.strip()[:120], "duration": ""})
+            cc.append({"text": c.strip()[:120], "duration": "", "evidence": ""})
     v = data.get("vitals") if isinstance(data.get("vitals"), dict) else {}
     vitals = {k: str(v.get(k, "")).strip() for k in ("bp", "hr", "temp", "spo2", "rr", "weight", "height") if str(v.get(k, "")).strip()}
+    ev_in = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    evidence = {k: _verify_quote(ev_in.get(k, ""), tx)[:200]
+                for k in ("hpi", "past_history", "allergies", "medications", "general_exam", "systemic_exam", "vitals")}
+    evidence = {k: q for k, q in evidence.items() if q}      # keep only verified quotes
     return {
         "chief_complaints": cc[:10],
         "hpi": str(data.get("hpi", "")).strip(),
@@ -647,7 +669,72 @@ async def extract(body: ExtractRequest, user: CurrentUser = Depends(get_current_
         "general_exam": str(data.get("general_exam", "")).strip(),
         "systemic_exam": str(data.get("systemic_exam", "")).strip(),
         "vitals": vitals,
+        "evidence": evidence,
     }
+
+
+# --------------------------------------------------------------------- #
+# clinical_facts: the append-only, doctor-provenance store that IS the
+# longitudinal patient memory. We write to it only when the doctor has
+# attested a completed note — so every fact is doctor-confirmed.
+# --------------------------------------------------------------------- #
+_ENTITY_FACTS = {"diagnoses": "diagnosis", "allergies": "allergy", "symptoms": "symptom"}
+
+
+def _fact_rows(clinic_id, patient_id, visit_id, actor_id, now, *, entities, prescription, vitals):
+    rows: list[dict] = []
+
+    def add(fact_type: str, value: str, structured: dict | None = None):
+        value = str(value or "").strip()
+        if not value:
+            return
+        rows.append({
+            "clinic_id": clinic_id, "patient_id": patient_id, "visit_id": visit_id,
+            "fact_type": fact_type, "value": value[:500], "structured": structured or {},
+            "source": "doctor_confirmed_ai", "status": "confirmed",
+            "asserted_by": actor_id, "asserted_at": now,
+        })
+
+    ent = entities or {}
+    for key, ftype in _ENTITY_FACTS.items():
+        for item in (ent.get(key) or []):
+            if isinstance(item, dict):
+                add(ftype, item.get("value") or item.get("name") or item.get("text") or "", item)
+            else:
+                add(ftype, item)
+
+    # Medications the patient reported (history) — kept distinct from the Rx.
+    for item in (ent.get("medications") or []):
+        add("medication", item if isinstance(item, str) else (item.get("value") or item.get("name") or ""),
+            {"context": "reported"} if isinstance(item, str) else {"context": "reported", **item})
+
+    # Medications the doctor prescribed this visit.
+    for rx in (prescription or []):
+        if isinstance(rx, dict):
+            name = rx.get("drug") or rx.get("name") or rx.get("brand") or rx.get("generic") or ""
+            add("medication", name, {"context": "prescribed", **rx})
+        else:
+            add("medication", rx, {"context": "prescribed"})
+
+    for metric, reading in (vitals or {}).items():
+        if str(reading).strip():
+            add("vital", f"{metric}: {reading}", {"metric": metric, "reading": str(reading)})
+
+    return rows
+
+
+async def _write_facts(h, clinic_id, patient_id, visit_id, actor_id, now, *,
+                       entities, prescription, vitals):
+    """Persist the doctor-approved encounter into clinical_facts. Re-finalising a
+    visit supersedes its prior facts (append-only — we never delete), then writes
+    the current confirmed set."""
+    await rest("PATCH", "clinical_facts", headers=h,
+               params={"visit_id": f"eq.{visit_id}", "status": "eq.confirmed"},
+               json={"status": "superseded"})
+    rows = _fact_rows(clinic_id, patient_id, visit_id, actor_id, now,
+                      entities=entities, prescription=prescription, vitals=vitals)
+    if rows:
+        await rest("POST", "clinical_facts", headers=h, json=rows)
 
 
 # --------------------------------------------------------------------- #
@@ -676,6 +763,7 @@ class SaveRequest(BaseModel):
     clinical_considerations: dict | None = None
     vitals: dict | None = None
     wizard: dict | None = None                # structured wizard state, for resuming drafts
+    sign_off: dict | None = None              # completeness-gate warnings + overrides (with reasons)
     # Consent + physician attestation (P0 safety layer).
     consent_given: bool = False
     consent_method: str | None = None       # 'verbal' | 'written'
@@ -724,6 +812,7 @@ async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user))
         "clinical_considerations": body.clinical_considerations or {},
         "vitals": body.vitals or {},
         "wizard": body.wizard or {},
+        "sign_off": body.sign_off or {},
     }
     attest = ({"attested": True, "attested_at": now, "attested_by": user.user_id}
               if not is_draft else {"attested": False})
@@ -759,7 +848,16 @@ async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user))
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Note save failed: {n.text[:300]}")
         action = "save_draft" if is_draft else "save_visit"
 
+    # A completed, attested note becomes durable patient memory: fan the
+    # doctor-approved encounter out into the append-only clinical_facts store.
+    if not is_draft:
+        await _write_facts(h, user.clinic_id, patient_id, visit_id, user.user_id, now,
+                           entities=body.entities, prescription=body.prescription, vitals=body.vitals)
+
+    after = {"patient_id": patient_id, "status": visit_status}
+    overrides = (body.sign_off or {}).get("overrides") if not is_draft else None
+    if overrides:
+        after["overrides"] = overrides       # ignored safety warnings are permanently on record
     await audit(clinic_id=user.clinic_id, actor_id=user.user_id, action=action,
-                entity="visit", entity_id=visit_id,
-                after={"patient_id": patient_id, "status": visit_status})
+                entity="visit", entity_id=visit_id, after=after)
     return {"visit_id": visit_id, "patient_id": patient_id, "status": visit_status}
