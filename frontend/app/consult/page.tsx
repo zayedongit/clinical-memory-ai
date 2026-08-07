@@ -29,6 +29,7 @@ type TxDrug = { drug: string; dose: string; route: string; frequency: string; du
 type Treatment = { diagnosis: string; first_line: TxDrug[]; non_pharmacological: string[] };
 type DS = { available: boolean; differential_diagnosis: Ddx[]; must_not_miss: { diagnosis: string }[]; investigations: Investigation[]; treatment: Treatment[] };
 type RxItem = { drug: string; brand: string; dose: string; frequency: string; duration: string; route: string };
+type StoredRx = { brand?: string; generic?: string; dose?: string; strength?: string; frequency?: string; duration?: string; instructions?: string };
 type RedFlag = { finding: string; concern: string; urgency: string; action: string };
 type LiveQ = { question: string; severity: string };
 type Consider = { translation: string; symptoms: string[]; red_flags: RedFlag[]; questions: LiveQ[] };
@@ -162,6 +163,7 @@ export default function ConsultWizard() {
   const [memoryOpen, setMemoryOpen] = useState(true);
   const [liveMode, setLiveMode] = useState(true);           // fresh consults open in live mode (the main flow)
   const [liveConsider, setLiveConsider] = useState<Consider>({ translation: "", symptoms: [], red_flags: [], questions: [] });
+  const [lastRx, setLastRx] = useState<{ date: string | null; items: StoredRx[] } | null>(null);
 
   function applyExtract(ex: Extracted) {
     setEnc((e) => ({
@@ -231,6 +233,7 @@ export default function ConsultWizard() {
     const r = await apiGet(`/patients/${pid}`);
     if (r.ok) { const p = await r.json(); setPatient(p); setVitals((v) => ({ ...v, weight: p.weight_kg ? String(p.weight_kg) : v.weight, height: p.height_cm ? String(p.height_cm) : v.height })); }
     loadMemory(pid);
+    loadLastVisit(pid);
   }
 
   async function loadMemory(pid: string) {
@@ -238,6 +241,13 @@ export default function ConsultWizard() {
     if (!r.ok) return;
     const m: Memory = await r.json();
     if (m.visit_count > 0 || m.allergies.length || m.problems.length) setMemory(m);
+  }
+
+  async function loadLastVisit(pid: string) {
+    const r = await apiGet(`/patients/${pid}/last-visit`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.found && d.prescription?.length) setLastRx({ date: d.visit_date, items: d.prescription });
   }
 
   const bmi = useMemo(() => { const w = parseFloat(vitals.weight), h = parseFloat(vitals.height); return w && h ? (w / ((h / 100) ** 2)).toFixed(1) : ""; }, [vitals.weight, vitals.height]);
@@ -320,6 +330,22 @@ export default function ConsultWizard() {
   }
 
   function addTx(d: TxDrug) { setRx((prev) => prev.some((x) => x.drug === d.drug) ? prev : [...prev, { drug: d.drug, brand: d.brands[0] || "", dose: d.dose, frequency: d.frequency, duration: d.duration, route: d.route }]); }
+  function removeRx(i: number) { setRx((prev) => prev.filter((_, idx) => idx !== i)); }
+  function repeatLastRx() {
+    if (!lastRx) return;
+    setRx((prev) => {
+      const seen = new Set(prev.map((x) => x.drug.toLowerCase()));
+      const add: RxItem[] = [];
+      for (const it of lastRx.items) {
+        const drug = (it.generic || it.brand || "").trim();
+        if (!drug || seen.has(drug.toLowerCase())) continue;
+        const route = (it.instructions || "").replace(/^Route:\s*/i, "").trim();
+        add.push({ drug, brand: it.brand || "", dose: it.dose || it.strength || "", frequency: it.frequency || "", duration: it.duration || "", route });
+        seen.add(drug.toLowerCase());
+      }
+      return [...prev, ...add];
+    });
+  }
 
   function composeNote() {
     const complaintsTxt = enc.complaints.map((c) => `${c.text}${c.duration ? ` (${c.duration})` : ""}`).join("; ");
@@ -529,6 +555,13 @@ export default function ConsultWizard() {
             {dsBusy && <span className="text-slate-400">{dsBusy}</span>}
           </div>
 
+          {lastRx && rx.length === 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm">
+              <span className="text-blue-800">Returning patient{lastRx.date ? ` · last visit ${new Date(lastRx.date).toLocaleDateString()}` : ""} — repeat the previous prescription?</span>
+              <button onClick={repeatLastRx} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700">↺ Same as last visit</button>
+            </div>
+          )}
+
           {dsFailed && !dsBusy && (
             <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
               <p className="font-semibold">Decision support is {dsFailed === "unavailable" ? "unavailable right now" : "unreachable"}.</p>
@@ -611,6 +644,20 @@ export default function ConsultWizard() {
                 <button onClick={() => setSub("ix")} className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600">← Investigations</button>
                 <button onClick={() => setStep(3)} className="btn-primary">Review &amp; Sign →</button>
               </div>
+            </div>
+          )}
+
+          {rx.length > 0 && (
+            <div className="glass rounded-2xl p-4">
+              <SectionHead title={`Current prescription (${rx.length})`} note="carried forward or added — edit freely" />
+              <ul className="space-y-1.5">
+                {rx.map((r, i) => (
+                  <li key={i} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm">
+                    <span className="text-slate-800"><span className="font-medium">{r.brand || r.drug}</span>{r.drug && r.brand && <span className="text-slate-400"> ({r.drug})</span>}<span className="text-slate-500"> {[r.dose, r.frequency, r.duration, r.route].filter(Boolean).join(" · ")}</span></span>
+                    <button onClick={() => removeRx(i)} className="text-xs text-slate-400 hover:text-red-600">Remove</button>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </div>
