@@ -200,6 +200,36 @@ async def patient_memory(patient_id: str, user: CurrentUser = Depends(get_curren
     }
 
 
+@router.get("/patients/{patient_id}/last-visit")
+async def last_visit(patient_id: str, user: CurrentUser = Depends(get_current_user)):
+    """The most recent completed visit's prescription — powers 'same as last
+    visit' carry-forward for chronic patients. Doctor always confirms/edits."""
+    r = await rest(
+        "GET", "visits", headers=user_headers(user.token),
+        params={
+            "patient_id": f"eq.{patient_id}",
+            "status": f"in.({','.join(_COMPLETED)})",
+            "deleted_at": "is.null",
+            "select": "id,approved_at,started_at,soap_notes(prescription,assessment)",
+            "order": "approved_at.desc.nullslast,started_at.desc",
+            "limit": "1",
+        },
+    )
+    rows = r.json() if r.status_code == 200 else []
+    if not rows:
+        return {"found": False, "visit_date": None, "assessment": "", "prescription": []}
+    v = rows[0]
+    notes = v.get("soap_notes") or []
+    note = notes[0] if notes else {}
+    rx = note.get("prescription") or []
+    return {
+        "found": bool(rx),
+        "visit_date": v.get("approved_at") or v.get("started_at"),
+        "assessment": (note.get("assessment") or "").strip()[:160],
+        "prescription": rx,
+    }
+
+
 @router.get("/patients/{patient_id}/visits")
 async def list_visits(patient_id: str, user: CurrentUser = Depends(get_current_user)):
     r = await rest(
