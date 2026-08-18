@@ -187,17 +187,3 @@ And five more I'd want fixed before this went anywhere near real patients:
 
 The external clinical synthesis API is not mine. It is also a single point of dependency, alongside
 Supabase, and I would treat both as risks in any real deployment.
-
----
-
-## How this was built
-
-Built solo, with heavy use of AI coding assistants. I would rather state that than have it inferred.
-
-What it means in practice: the architectural decisions are mine and I can defend them — RLS over
-application-layer filtering, append-only provenance, quote verification, fail-open suggestions with
-fail-closed attestation, two-lane live scribe. I reviewed and reworked generated code rather than
-accepting it, and both failures above are cases where the generated version looked fine and was wrong.
-
-I can open any file in this repository, explain what it does and why it is shaped that way, and change
-it live.

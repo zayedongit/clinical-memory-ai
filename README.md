@@ -18,7 +18,7 @@ memory and guideline-grounded decision support. The physician stays in control a
 > **Status:** working local prototype under active development. Not deployed, not a certified medical
 > device. Reviewed weekly with a qualified physician.
 
-📄 **[Read the case study](docs/CASE_STUDY.md)** — the engineering decisions, what broke, and what I'd
+**[Read the case study](docs/CASE_STUDY.md)** — the engineering decisions, what broke, and what I'd
 fix given another week.
 
 ---
@@ -213,18 +213,6 @@ clinical-memory-ai/
 **Printable prescription / visit record**
 
 ![Printable prescription](docs/screenshots/prescription.png)
-
----
-
-## How this was built
-
-Built solo, with heavy use of AI coding assistants — stated rather than left to be inferred. The
-architectural decisions are mine and I can defend them: RLS over application-layer filtering,
-append-only provenance, quote verification, fail-open suggestions with fail-closed attestation, the
-two-lane live scribe. Generated code was reviewed and reworked rather than accepted — both failures
-above are cases where the generated version looked fine and was wrong.
-
-I can open any file here, explain what it does and why it's shaped that way, and change it live.
 
 ---
 
