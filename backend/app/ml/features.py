@@ -191,9 +191,19 @@ def _vital(vitals: dict, key: str) -> float | None:
     return _as_float(re.sub(r"[^\d.]", "", raw)) if raw else None
 
 
+_WHITESPACE = re.compile(r"\s+")
+
+
 def _matches(text: str, phrases: tuple[str, ...]) -> bool:
-    """Phrase present and not negated."""
-    low = f" {re.sub(r'\\s+', ' ', text.lower())} "
+    """Phrase present and not negated.
+
+    Whitespace is collapsed first. The HPI is model-generated prose and
+    routinely contains newlines and bullet lists, so a multi-word phrase
+    straddling a line break — "chest\npain" — would otherwise not match, and
+    the deterministic red-flag criteria in `clinical/risk.py` would silently
+    miss the case they exist for.
+    """
+    low = f" {_WHITESPACE.sub(' ', text.lower())} "
     for phrase in phrases:
         for m in re.finditer(re.escape(phrase.lower()), low):
             window = low[max(0, m.start() - _NEGATION_WINDOW):m.start()]

@@ -43,6 +43,11 @@ NEAR_MATCH_THRESHOLD = 0.82
 # Shortest quote worth checking. Anything shorter matches by accident.
 MIN_QUOTE_CHARS = 4
 
+# Ceiling on how many anchor positions the near-match search will explore.
+# Verification runs inside an async request handler, so an unbounded scan is an
+# event-loop stall, not just slow code.
+MAX_ANCHORS = 24
+
 _FILLER = {
     "the", "a", "an", "and", "or", "of", "to", "in", "is", "was", "it", "that",
     "this", "for", "on", "at", "as", "with", "from", "has", "have", "had",
@@ -106,21 +111,50 @@ def verify(quote: str, transcript: str) -> Verification:
     if not needed or not needed.issubset(set(transcript_words)):
         return Verification(raw, "unsupported", 0.0)
 
+    # Search only windows that could possibly match, rather than every offset.
+    #
+    # A near match must contain every content word of the quote (checked above),
+    # so it must overlap a position where the quote's *rarest* content word
+    # occurs. Anchoring on those positions turns a full scan into a handful of
+    # comparisons. On a 60,000-character transcript the naive scan cost 0.56 s
+    # of CPU per quote — and `/scribe/extract` verifies up to seventeen quotes,
+    # so a long consultation blocked the event loop for ten seconds, stalling
+    # every other request in the process including other doctors' live polls.
     span = len(quote_words)
+    positions: dict[str, list[int]] = {}
+    for index, word in enumerate(transcript_words):
+        if word in needed:
+            positions.setdefault(word, []).append(index)
+    if not positions:
+        return Verification(raw, "unsupported", 0.0)
+
+    rarest = min(positions.values(), key=len)
+    widths = sorted({span, span + 2, max(span - 2, 1)})
+
+    # Cap the work regardless: a pathological transcript where the anchor word
+    # appears thousands of times must not reintroduce the stall.
+    anchors = rarest[:MAX_ANCHORS]
+
     best, best_window = 0.0, ""
     matcher = SequenceMatcher(autojunk=False)
     matcher.set_seq2(nq)
-    # Slide a window of the quote's length (plus a little slack for the filler
-    # words the model dropped) across the transcript.
-    for width in {span, span + 2, max(span - 2, 1)}:
-        for start in range(0, max(len(transcript_words) - width + 1, 1)):
-            window = " ".join(transcript_words[start:start + width])
-            matcher.set_seq1(window)
-            if matcher.real_quick_ratio() < best or matcher.quick_ratio() < best:
-                continue
-            ratio = matcher.ratio()
-            if ratio > best:
-                best, best_window = ratio, window
+    seen: set[tuple[int, int]] = set()
+    for anchor in anchors:
+        for width in widths:
+            # The anchor can sit anywhere inside the window, so slide the window
+            # across it rather than assuming the anchor starts it.
+            for start in range(max(anchor - width + 1, 0), min(anchor + 1, len(transcript_words))):
+                key = (start, width)
+                if key in seen:
+                    continue
+                seen.add(key)
+                window = " ".join(transcript_words[start:start + width])
+                matcher.set_seq1(window)
+                if matcher.real_quick_ratio() < best or matcher.quick_ratio() < best:
+                    continue
+                ratio = matcher.ratio()
+                if ratio > best:
+                    best, best_window = ratio, window
 
     if best >= NEAR_MATCH_THRESHOLD:
         return Verification(raw, "near", round(best, 3), best_window)

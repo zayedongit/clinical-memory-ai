@@ -135,3 +135,58 @@ def test_verdicts_are_recorded_as_metrics():
     counters = registry.snapshot()["counters"]
     assert counters.get("cma_citations_total{verdict=exact}") == 1
     assert counters.get("cma_citations_total{verdict=unsupported}") == 1
+
+
+# --------------------------------------------------------------------- #
+# Cost — verification runs inside an async request handler
+# --------------------------------------------------------------------- #
+def test_verification_of_a_long_transcript_stays_fast():
+    """This is an event-loop concern, not a micro-optimisation.
+
+    The near-match search originally slid three window widths across every
+    offset of the transcript. At the 60,000-character cap that cost ~0.56 s of
+    CPU for a single quote, and /scribe/extract verifies up to seventeen — so a
+    long consultation blocked the event loop for about ten seconds, stalling
+    every other request in the process, including other doctors' live polls.
+
+    The search is now anchored on the quote's rarest content word, which must
+    appear in any window that could match.
+    """
+    import time
+
+    transcript = " ".join(
+        ["doctor namaste kya problem hai patient mujhe chest pain hai since two days aur sweating"]
+        * 700
+    )[:60_000]
+    # A paraphrase whose content words are all present, so the cheap subset
+    # pre-filter does not short-circuit and the full search runs.
+    quote = "patient mujhe chest pain since days sweating problem"
+
+    started = time.perf_counter()
+    citations.verify(quote, transcript)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.10, f"verification took {elapsed:.2f}s on a 60k transcript"
+
+
+def test_anchoring_did_not_change_any_verdict():
+    """The optimisation must be behaviour-preserving: a near match still has to
+    be found, and a fabrication still has to be rejected."""
+    transcript = (
+        "Doctor: kya problem hai? Patient: uh, mujhe chest pain hai since, since two days, "
+        "aur bahut sweating ho rahi hai."
+    )
+    assert citations.verify("mujhe chest pain hai since two days", transcript).verdict == "near"
+    assert citations.verify("mujhe chest pain hai", transcript).verdict == "exact"
+    assert not citations.verify("mujhe headache hai since two days", transcript).supported
+
+
+def test_a_repeated_anchor_word_does_not_reintroduce_the_stall():
+    """A transcript where the anchor appears thousands of times must still be
+    bounded — hence MAX_ANCHORS."""
+    import time
+
+    transcript = " ".join(["chest pain"] * 5000)
+    started = time.perf_counter()
+    citations.verify("chest pain reported repeatedly today", transcript)
+    assert time.perf_counter() - started < 0.10

@@ -271,3 +271,60 @@ describe("authentication", () => {
     await waitFor(() => expect(push).toHaveBeenCalledWith("/login"));
   });
 });
+
+describe("longitudinal memory panel", () => {
+  it("renders trends from the analytics series shape the backend returns", async () => {
+    // /patients/{id}/memory returns Record<string, SeriesAnalysis>, not a bare
+    // point list. Reading `pts.length` on it silently rendered nothing *and*
+    // suppressed the "Not enough data yet" fallback, because `undefined < 2`
+    // is false — so the panel was blank with no explanation.
+    installFetch({
+      "GET /patients/p1/memory": () => json({
+        visit_count: 5, problems: [], allergies: [], allergy_status: "documented_none",
+        current_medications: [], flagged_metrics: ["bp"], recurring_symptoms: [],
+        unresolved: [], since_last: {},
+        medication_changes: { current: [], started: [], stopped: [], continued: [], visits_compared: 2 },
+        trends: {
+          bp: {
+            metric: "bp", n: 5, latest: 156, direction: "rising", significant: true,
+            p_value: 0.0275, step_change: null,
+            points: [
+              { date: "2026-01-01", value: 128 }, { date: "2026-02-01", value: 134 },
+              { date: "2026-03-01", value: 142 }, { date: "2026-04-01", value: 148 },
+              { date: "2026-05-01", value: 156 },
+            ],
+          },
+        },
+        method: {}, disclaimer: "",
+      }),
+    });
+    const Consult = await loadPage();
+    render(<Consult />);
+
+    const panel = await screen.findByText(/Patient memory/i);
+    expect(panel).toBeInTheDocument();
+    expect(await screen.findByText("156")).toBeInTheDocument();
+    expect(screen.getByText(/rising p=0.0275/)).toBeInTheDocument();
+    expect(screen.queryByText(/Not enough data yet/)).not.toBeInTheDocument();
+  });
+
+  it("shows the fallback when there are not enough readings", async () => {
+    installFetch({
+      "GET /patients/p1/memory": () => json({
+        visit_count: 1, problems: [], allergies: [], allergy_status: "not_recorded",
+        current_medications: [], flagged_metrics: [], recurring_symptoms: [],
+        unresolved: [], since_last: {},
+        medication_changes: { current: [], started: [], stopped: [], continued: [], visits_compared: 1 },
+        trends: {
+          hr: { metric: "hr", n: 1, latest: 78, direction: "insufficient_data",
+                significant: false, p_value: 1, step_change: null,
+                points: [{ date: "2026-01-01", value: 78 }] },
+        },
+        method: {}, disclaimer: "",
+      }),
+    });
+    const Consult = await loadPage();
+    render(<Consult />);
+    expect(await screen.findByText(/Not enough data yet/)).toBeInTheDocument();
+  });
+});

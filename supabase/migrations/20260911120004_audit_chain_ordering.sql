@@ -127,7 +127,11 @@ end $$;
 -- Chain verification, so "tamper-evident" is a query rather than a claim.
 -- Returns one row per break. An intact chain returns nothing.
 -- ---------------------------------------------------------------------
-create or replace function public.verify_audit_chain(p_clinic_id uuid default null)
+-- A later migration adds a clinic_id column to the result, and a return type
+-- cannot be replaced in place — so drop first to keep this file re-runnable.
+drop function if exists public.verify_audit_chain(uuid);
+
+create function public.verify_audit_chain(p_clinic_id uuid default null)
 returns table (seq bigint, id uuid, problem text)
 language plpgsql
 stable

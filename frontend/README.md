@@ -28,7 +28,7 @@ The backend must be running (`make dev-backend` from the repository root).
 ```bash
 pnpm exec tsc --noEmit
 pnpm run lint
-pnpm test                # 36 tests
+pnpm test                # 38 tests
 pnpm run build           # works with no credentials — see below
 ```
 

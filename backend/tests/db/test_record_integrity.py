@@ -8,7 +8,7 @@ from itertools import pairwise
 import psycopg
 import pytest
 
-from .conftest import CLINIC_A, PATIENT_A
+from .conftest import CLINIC_A, CLINIC_B, PATIENT_A, PATIENT_B
 from .test_finalize_visit import finalize
 
 pytestmark = pytest.mark.db
@@ -359,3 +359,109 @@ def test_updating_a_note_actually_updates_it(doctor_a):
                  "where visit_id = %s", (draft["visit_id"],))
     assert doctor_a.one("select assessment from public.soap_notes where visit_id = %s",
                         (draft["visit_id"],)) == "Revised assessment"
+
+
+# ===================================================================== #
+# Audit-chain verification scope
+# ===================================================================== #
+def test_verify_audit_chain_is_clean_across_multiple_clinics(doctor_a, doctor_b, service_role):
+    """The chain is built per clinic, so the verifier must walk it per clinic.
+
+    Walking every row in one global order with a single running hash reported
+    two false breaks as soon as a second clinic existed — and the no-argument
+    call is the one an operator reaches for. An integrity check that cries wolf
+    trains the reader to ignore it, which is exactly when a real break slips by.
+    """
+    finalize(doctor_a, draft=True, attested=False)
+    service_role.run(
+        "insert into public.audit_log (clinic_id, action, entity) values (%s, 'save_draft', 'visit')",
+        (CLINIC_B,))
+    finalize(doctor_a, draft=True, attested=False)
+
+    # As the owner (no clinic), scoped to nothing: every clinic, still clean.
+    breaks = service_role.conn.execute("select * from public.verify_audit_chain()").fetchall()
+    assert breaks == [], f"false tampering reported across clinics: {breaks}"
+
+
+def test_a_doctor_can_only_verify_their_own_clinics_log(doctor_a):
+    """The function is SECURITY DEFINER and granted to `authenticated`. Scanning
+    every clinic by default let any signed-in user enumerate other clinics'
+    audit rows."""
+    assert doctor_a.all("select * from public.verify_audit_chain()") == []
+    error = doctor_a.expect_error("select * from public.verify_audit_chain(%s)", (CLINIC_B,))
+    assert isinstance(error, psycopg.errors.InsufficientPrivilege)
+
+
+def test_an_audit_entry_cannot_reference_a_record_in_another_clinic(doctor_a, service_role):
+    other_visit = "dddddddd-0000-0000-0000-00000000000b"
+    service_role.run(
+        "insert into public.visits (id, patient_id, clinic_id, status) "
+        "values (%s, %s, %s, 'approved')", (other_visit, PATIENT_B, CLINIC_B))
+
+    error = doctor_a.expect_error(
+        "select public.write_audit('delete_visit', 'visit', %s)", (other_visit,))
+    assert isinstance(error, psycopg.errors.NoDataFound)
+
+
+def test_an_audit_entry_cannot_reference_a_record_that_does_not_exist(doctor_a):
+    error = doctor_a.expect_error(
+        "select public.write_audit('delete_visit', 'visit', "
+        "'99999999-9999-9999-9999-999999999999')")
+    assert isinstance(error, psycopg.errors.NoDataFound)
+
+
+def test_a_null_entity_id_is_still_permitted(doctor_a):
+    """Some actions genuinely have no single subject."""
+    assert doctor_a.expect_error("select public.write_audit('save_draft', 'visit', null)") is None
+
+
+# ===================================================================== #
+# Patient creation is inside the finalize transaction
+# ===================================================================== #
+def test_a_new_patient_is_created_inside_the_transaction(doctor_a):
+    before = doctor_a.one("select count(*) from public.patients")
+    result = doctor_a.one(
+        "select public.finalize_visit(p_patient_id := null, p_note := %s::jsonb, "
+        "p_facts := '[]'::jsonb, p_draft := false, p_attested := true, "
+        "p_new_patient := %s::jsonb)",
+        ('{"assessment":"URTI"}', '{"name":"Walk-in Patient","gender":"female","dob":"1990-01-01"}'),
+    )
+    assert result["patient_created"] is True
+    assert doctor_a.one("select count(*) from public.patients") == before + 1
+    assert doctor_a.one(
+        "select name from public.patients where id = %s", (result["patient_id"],)
+    ) == "Walk-in Patient"
+
+
+def test_a_failed_save_leaves_no_orphan_patient(doctor_a):
+    """The create used to be a separate call *before* the RPC, so a failed save
+    left the patient committed — and every retry made another record for the
+    same person."""
+    before = doctor_a.one("select count(*) from public.patients")
+    error = doctor_a.expect_error(
+        "select public.finalize_visit(p_patient_id := null, p_note := '{}'::jsonb, "
+        "p_facts := %s::jsonb, p_draft := false, p_attested := true, "
+        "p_new_patient := %s::jsonb)",
+        ('[{"fact_type":"not_a_real_type","value":"x"}]', '{"name":"Orphan Candidate"}'),
+    )
+    assert isinstance(error, psycopg.errors.CheckViolation)
+    assert doctor_a.one("select count(*) from public.patients") == before
+    assert doctor_a.one(
+        "select count(*) from public.patients where name = 'Orphan Candidate'") == 0
+
+
+def test_creating_a_patient_without_a_name_is_refused(doctor_a):
+    for payload in ('{}', '{"name":""}', '{"name":"   "}'):
+        error = doctor_a.expect_error(
+            "select public.finalize_visit(p_patient_id := null, p_note := '{}'::jsonb, "
+            "p_draft := true, p_new_patient := %s::jsonb)", (payload,))
+        assert isinstance(error, psycopg.errors.CheckViolation), payload
+
+
+def test_a_patient_created_during_a_consultation_is_audited(doctor_a):
+    result = doctor_a.one(
+        "select public.finalize_visit(p_patient_id := null, p_note := '{}'::jsonb, "
+        "p_draft := true, p_new_patient := %s::jsonb)", ('{"name":"Audited Patient"}',))
+    assert doctor_a.one(
+        "select count(*) from public.audit_log where action = 'create_patient' "
+        "and entity_id = %s", (result["patient_id"],)) == 1

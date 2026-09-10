@@ -233,10 +233,10 @@ It is a **documentation** metric. A note can score 100 and be clinically wrong.
 
 | Suite | Count | What it covers |
 |---|---|---|
-| Backend unit + integration | 277 | Auth, authorisation, provider failover, citation verification, JSON repair, rate limiting, spend control, metrics, PHI redaction, error translation |
-| Database (real PostgreSQL) | 89 | RLS isolation, attestation, optimistic locking, audit hash chain, append-only facts, signed-note immutability, concurrent finalize |
-| Frontend | 36 | Attestation gate, save-failure handling, draft resume with versioning, escalation panel, prescription safety, API error translation |
-| **Total** | **402** | |
+| Backend unit + integration | 290 | Auth, authorisation, provider failover, citation verification, JSON repair, rate limiting, spend control, metrics, PHI redaction, error translation |
+| Database (real PostgreSQL) | 98 | RLS isolation, attestation, optimistic locking, audit hash chain, append-only facts, signed-note immutability, concurrent finalize |
+| Frontend | 38 | Attestation gate, save-failure handling, draft resume with versioning, escalation panel, prescription safety, API error translation |
+| **Total** | **426** | |
 
 The database tests build a fresh database from the committed migrations every
 run — which is itself the test that the migrations reproduce the system.
@@ -287,7 +287,7 @@ Being precise about this matters more than it flatters.
 
 | | |
 |---|---|
-| **Built here** | The consultation workflow, the data model and its provenance rules, RLS policies, the transactional finalize function, the audit hash chain, the provider-failover layer, citation verification, the escalation-risk model and its features, the longitudinal statistics, the completeness rubric, every evaluation harness, the metrics layer, all 402 tests |
+| **Built here** | The consultation workflow, the data model and its provenance rules, RLS policies, the transactional finalize function, the audit hash chain, the provider-failover layer, citation verification, the escalation-risk model and its features, the longitudinal statistics, the completeness rubric, every evaluation harness, the metrics layer, all 426 tests |
 | **Not built here** | Differential diagnosis, investigation and treatment recommendations — these come from an external Clinical Synthesis API. This project integrates it: request shaping, response normalisation, failure containment, and keeping its secret base URL out of the browser |
 | **Third-party** | OpenAI and Sarvam for speech, Gemini and OpenAI for structuring, Supabase for Postgres and auth |
 

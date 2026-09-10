@@ -26,7 +26,6 @@ type Summary = {
   visit_count: number; problems: string[]; medications: string[]; allergies: string[];
   recurring_symptoms: { term: string; occurrences: number }[];
   allergy_status?: "documented" | "documented_none" | "not_recorded";
-  recent_visits: { date: string; assessment: string }[];
   since_last: { new_symptoms?: string[]; resolved_symptoms?: string[]; new_medications?: string[]; stopped_medications?: string[] };
   context_text: string;
 };
@@ -77,6 +76,10 @@ export default function ScribePage() {
   const [showHistory, setShowHistory] = useState(true);
   const [fromLive, setFromLive] = useState(false);
   const [draftVisitId, setDraftVisitId] = useState<string | null>(null);
+  // The version last read for this visit. Sent back on every save so the
+  // backend can reject a write that would clobber a concurrent edit. Without
+  // it the optimistic lock is opt-in, and this flow silently opted out.
+  const [visitVersion, setVisitVersion] = useState<number | null>(null);
   const [draftSaved, setDraftSaved] = useState(false);
   // Clinical Synthesis clinical decision support
   const [ds, setDs] = useState<DecisionSupport | null>(null);
@@ -112,6 +115,7 @@ export default function ScribePage() {
     const n = v.note;
     if (!n) return;
     setDraftVisitId(vid);
+    setVisitVersion(v.version ?? null);
     if (v.patient_id) await attach(v.patient_id);
     setTranscript(n.transcript || "");
     setSoap({ subjective: n.subjective || "", objective: n.objective || "", assessment: n.assessment || "", plan: n.plan || "" });
@@ -128,14 +132,16 @@ export default function ScribePage() {
     if (!patientId) { setError("Attach a patient to save a draft."); return; }
     setBusy("Saving draft…"); setError(null); setDraftSaved(false);
     const r = await apiPost("/scribe/save", {
-      patient_id: patientId, visit_id: draftVisitId ?? undefined, status: "in_progress",
+      patient_id: patientId, visit_id: draftVisitId ?? undefined,
+      expected_version: visitVersion ?? undefined, status: "in_progress",
       transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps,
       prescription: rx.map(stripUiFields), clinical_considerations: considerations ?? undefined,
       vitals: cleanVitals(), consent_given: consent, consent_method: consent ? "verbal" : undefined,
     });
     setBusy(null);
     if (!r.ok) { setError(await apiError(r, "Couldn't save the draft.")); return; }
-    setDraftVisitId((await r.json()).visit_id); setDraftSaved(true);
+    const saved = await r.json();
+    setDraftVisitId(saved.visit_id); setVisitVersion(saved.version ?? null); setDraftSaved(true);
   }
 
   async function getDecisionSupport() {
@@ -452,7 +458,8 @@ export default function ScribePage() {
           payload={{ transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps,
             prescription: rx.map(stripUiFields), clinical_considerations: considerations ?? undefined,
             vitals: cleanVitals(), consent_given: consent, consent_method: consent ? "verbal" : undefined,
-            visit_id: draftVisitId ?? undefined, status: "completed" }} />
+            visit_id: draftVisitId ?? undefined, expected_version: visitVersion ?? undefined,
+            status: "completed" }} />
       )}
     </main>
   );
@@ -560,12 +567,6 @@ function HistoryPanel({ s }: { s: Summary }) {
           {sl.stopped_medications?.length ? <p>Stopped: {sl.stopped_medications.join(", ")}</p> : null}
         </div>
       ) : null}
-      {s.recent_visits.length > 0 && (
-        <div className="mt-2 border-t border-slate-200/70 pt-2">
-          <p className="mb-1 text-xs font-semibold text-slate-600">Recent visits</p>
-          {s.recent_visits.map((v, i) => <p key={i} className="text-xs text-slate-500">{new Date(v.date).toLocaleDateString()} — {v.assessment || "—"}</p>)}
-        </div>
-      )}
     </div>
   );
 }

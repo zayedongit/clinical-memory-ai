@@ -34,8 +34,17 @@ type StoredRx = { brand?: string; generic?: string; dose?: string; strength?: st
 type RedFlag = { finding: string; concern: string; urgency: string; action: string };
 type LiveQ = { question: string; severity: string };
 type Consider = { translation: string; symptoms: string[]; red_flags: RedFlag[]; questions: LiveQ[] };
-type TrendPt = { date: string; value: string };
-type Memory = { visit_count: number; problems: { label: string; count: number; first_seen: string; last_seen: string }[]; allergies: string[]; current_medications: string[]; trends: Record<string, TrendPt[]>; since_last: { new_problems?: string[]; new_medications?: string[]; stopped_medications?: string[] } };
+// `/patients/{id}/memory` returns the analytics series shape, not a bare
+// point list: each metric carries its trend verdict alongside the points.
+type TrendPt = { date: string; value: number };
+type MemoryTrend = {
+  metric: string; n: number; latest: number | null;
+  direction: "rising" | "falling" | "stable" | "insufficient_data";
+  significant: boolean; p_value: number;
+  step_change: { detected: boolean } | null;
+  points: TrendPt[];
+};
+type Memory = { visit_count: number; problems: { label: string; count: number; first_seen: string; last_seen: string }[]; allergies: string[]; current_medications: string[]; trends: Record<string, MemoryTrend>; since_last: { new_problems?: string[]; new_medications?: string[]; stopped_medications?: string[] } };
 
 type RiskPrompt = {
   kind: string; scored: boolean; escalate: boolean; probability?: number; band?: string;
@@ -88,10 +97,8 @@ function EvidenceChip({ q }: { q?: string }) {
   );
 }
 
-function _num(v: string): number { const s = String(v); return parseFloat(s.includes("/") ? s.split("/")[0] : s); }
-
 function Sparkline({ pts }: { pts: TrendPt[] }) {
-  const vals = pts.map((p) => _num(p.value)).filter((n) => !isNaN(n));
+  const vals = pts.map((p) => p.value).filter((n) => Number.isFinite(n));
   if (vals.length < 2) return null;
   const w = 56, h = 16, min = Math.min(...vals), max = Math.max(...vals), span = max - min || 1, step = w / (vals.length - 1);
   const d = vals.map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / span) * h).toFixed(1)}`).join(" ");
@@ -141,14 +148,22 @@ function MemoryPanel({ m, open, onToggle }: { m: Memory; open: boolean; onToggle
           <div>
             <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Trends</p>
             <div className="mt-1 space-y-1">
-              {Object.entries(m.trends).filter(([, pts]) => pts.length >= 2).slice(0, 4).map(([k, pts]) => (
-                <div key={k} className="flex items-center gap-2 text-xs">
-                  <span className="w-12 shrink-0 text-slate-500">{METRIC_LABEL[k] || k}</span>
-                  <Sparkline pts={pts} />
-                  <span className="text-slate-800">{pts[pts.length - 1].value}</span>
+              {Object.values(m.trends).filter((t) => t.points.length >= 2).slice(0, 4).map((t) => (
+                <div key={t.metric} className="flex items-center gap-2 text-xs">
+                  <span className="w-12 shrink-0 text-slate-500">{METRIC_LABEL[t.metric] || t.metric}</span>
+                  <Sparkline pts={t.points} />
+                  <span className="text-slate-800">{t.latest ?? "—"}</span>
+                  {t.significant && (
+                    <span className={`rounded px-1 text-[9px] font-semibold uppercase ${t.direction === "rising" ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-800"}`}>
+                      {t.direction} p={t.p_value}
+                    </span>
+                  )}
+                  {t.step_change?.detected && (
+                    <span className="rounded bg-amber-100 px-1 text-[9px] font-semibold uppercase text-amber-800">step</span>
+                  )}
                 </div>
               ))}
-              {Object.values(m.trends).every((p) => p.length < 2) && <p className="text-sm text-slate-400">Not enough data yet</p>}
+              {Object.values(m.trends).every((t) => t.points.length < 2) && <p className="text-sm text-slate-400">Not enough data yet</p>}
             </div>
           </div>
         </div>
@@ -437,7 +452,6 @@ export default function ConsultWizard() {
     if (!r.ok) return;
     const v = await r.json();
     setDraftVisitId(vid);
-    setVisitVersion(v.version ?? null);
     setVisitVersion(v.version ?? null);
     setLiveMode(false);                       // resuming saved work → manual wizard, not live
     if (v.patient_id) await attach(v.patient_id);

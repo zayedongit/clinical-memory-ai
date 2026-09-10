@@ -21,7 +21,7 @@ histories designed to exercise each analysis path:
 * **Meera Nair** — a problem recorded once as current and never revisited, which
   is what the "unresolved" analysis exists to surface.
 
-Refuses to run against anything that looks like a hosted database.
+Refuses to run against anything but a loopback database.
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ import os
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -117,17 +118,32 @@ PATIENTS: list[dict] = [
 ]
 
 
-def guard(dsn: str) -> None:
-    """Refuse anything that is not obviously a local scratch database."""
-    lowered = dsn.lower()
-    if any(marker in lowered for marker in ("supabase.co", "supabase.com", "amazonaws", "azure",
-                                            "render.com", "neon.tech")):
-        raise SystemExit(
-            "Refusing to seed demo data into what looks like a hosted database. "
-            "This script writes invented patients; point it at a local database."
-        )
-    if not any(host in lowered for host in ("localhost", "127.0.0.1", "::1", "/postgres")):
-        print(f"Warning: {dsn.split('@')[-1]} does not look local. Continuing.", file=sys.stderr)
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "", "/tmp", "/var/run/postgresql"}
+
+
+def guard(dsn: str, *, confirmed: bool) -> None:
+    """Refuse anything that is not a loopback database.
+
+    This script writes invented patients. An allow-list of loopback hosts is
+    the only check that is actually safe here: a deny-list of known cloud
+    providers misses every self-hosted database, and the earlier version also
+    accepted any DSN whose *database* happened to be named `postgres` — which
+    is the default name, so almost every connection string passed.
+
+    Anything else requires --i-know-this-is-not-local, so seeding a real
+    database is a deliberate act rather than a typo in an environment variable.
+    """
+    host = urlparse(dsn).hostname or ""
+    if host.lower() in LOOPBACK_HOSTS:
+        return
+    if confirmed:
+        print(f"Proceeding against non-loopback host {host!r} because you asked.", file=sys.stderr)
+        return
+    raise SystemExit(
+        f"Refusing to seed synthetic demo patients into {host!r}, which is not a loopback "
+        "address. Point CMA_TEST_DATABASE_URL at a local database, or pass "
+        "--i-know-this-is-not-local if you are certain."
+    )
 
 
 def seed(conn) -> None:
@@ -215,7 +231,7 @@ def main() -> int:
     if not dsn:
         print("Set CMA_TEST_DATABASE_URL (or DATABASE_URL) to a local database.", file=sys.stderr)
         return 2
-    guard(dsn)
+    guard(dsn, confirmed="--i-know-this-is-not-local" in sys.argv)
 
     print("Seeding SYNTHETIC demo data. No real patient information is used.\n")
     with psycopg.connect(dsn, autocommit=False) as conn:

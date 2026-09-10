@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import date
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
@@ -441,7 +442,9 @@ async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user))
             raise HTTPException(status.HTTP_403_FORBIDDEN,
                                 f"Role '{user.role}' may not sign a clinical note.")
 
-    patient_id = await _resolve_patient(body, user, headers)
+    new_patient = _new_patient_payload(body)
+    if not body.patient_id and not new_patient:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide patient_id or new_patient")
 
     so = body.soap or {}
     note = {
@@ -462,7 +465,7 @@ async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user))
     )
 
     resp = await rpc("finalize_visit", headers=headers, args={
-        "p_patient_id": patient_id,
+        "p_patient_id": body.patient_id,
         "p_note": note,
         "p_facts": facts,
         "p_visit_id": body.visit_id,
@@ -471,6 +474,7 @@ async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user))
         "p_attested": body.attested,
         "p_consent_given": body.consent_given,
         "p_consent_method": body.consent_method,
+        "p_new_patient": new_patient,
     })
 
     if resp.status_code not in (200, 201):
@@ -481,25 +485,29 @@ async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user))
     return result
 
 
-async def _resolve_patient(body: SaveRequest, user: CurrentUser, headers: dict) -> str:
-    if body.patient_id:
-        return body.patient_id
+def _new_patient_payload(body: SaveRequest) -> dict | None:
+    """The new-patient fields, shaped for finalize_visit().
+
+    Patient creation happens *inside* the finalize transaction. It used to be a
+    separate PostgREST insert beforehand, so a failed save — already signed,
+    version conflict, upstream error — left the patient row committed while the
+    UI showed "save failed" and stayed open. Every retry created another
+    record for the same person.
+    """
     if not body.new_patient:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide patient_id or new_patient")
-
-    from datetime import date
-
-    from ...core.supabase import rest
-
+        return None
     np = body.new_patient
+    # An age is recorded as a 1 January birth year, which is what the rest of
+    # the system already does when only an age is known.
     dob = f"{date.today().year - np.age:04d}-01-01" if np.age else None
-    r = await rest("POST", "patients", headers=headers, prefer="return=representation", json={
-        "clinic_id": user.clinic_id, "name": np.name, "gender": np.gender,
-        "phone": np.phone, "dob": dob, "height_cm": np.height_cm, "weight_kg": np.weight_kg,
-    })
-    if r.status_code not in (200, 201):
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Patient create failed: {r.text[:300]}")
-    return r.json()[0]["id"]
+    return {
+        "name": np.name,
+        "gender": np.gender or "",
+        "phone": np.phone or "",
+        "dob": dob or "",
+        "height_cm": str(np.height_cm) if np.height_cm is not None else "",
+        "weight_kg": str(np.weight_kg) if np.weight_kg is not None else "",
+    }
 
 
 # PostgreSQL SQLSTATEs raised by finalize_visit(), mapped to the HTTP status a

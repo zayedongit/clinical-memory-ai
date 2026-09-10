@@ -220,3 +220,54 @@ def test_save_requires_a_patient(as_doctor):
     r = as_doctor.post("/scribe/save", json={"status": "completed", "attested": True})
     assert r.status_code == 400
     assert "patient" in r.json()["detail"].lower()
+
+
+# --------------------------------------------------------------------- #
+# Patient creation is part of the same transaction
+# --------------------------------------------------------------------- #
+@respx.mock
+def test_a_new_patient_is_sent_to_the_database_function_not_created_beforehand(as_doctor):
+    """It used to be a separate PostgREST insert before the RPC, so a failed
+    save left the patient committed — and every retry made another record for
+    the same person."""
+    patients = respx.post(f"{SUPABASE}/rest/v1/patients")
+    rpc = respx.post(RPC_FINALIZE).mock(return_value=httpx.Response(
+        200, json={"visit_id": "v1", "patient_id": "p-new", "status": "approved",
+                   "version": 1, "facts_written": 2, "patient_created": True}))
+
+    body = _minimal_save()
+    body.pop("patient_id")
+    body["new_patient"] = {"name": "Walk-in Patient", "age": 34, "gender": "female"}
+    r = as_doctor.post("/scribe/save", json=body)
+
+    assert r.status_code == 200
+    assert patients.call_count == 0, "the patient must not be created outside the transaction"
+
+    import json as _json
+    sent = _json.loads(rpc.calls[0].request.read())
+    assert sent["p_patient_id"] is None
+    assert sent["p_new_patient"]["name"] == "Walk-in Patient"
+    assert sent["p_new_patient"]["dob"].endswith("-01-01"), "an age becomes a birth year"
+
+
+@respx.mock
+def test_a_failed_save_with_a_new_patient_creates_nothing(as_doctor):
+    patients = respx.post(f"{SUPABASE}/rest/v1/patients")
+    respx.post(RPC_FINALIZE).mock(return_value=httpx.Response(
+        400, json={"code": "40001", "message": "modified by someone else"}))
+
+    body = _minimal_save()
+    body.pop("patient_id")
+    body["new_patient"] = {"name": "Walk-in Patient"}
+    r = as_doctor.post("/scribe/save", json=body)
+
+    assert r.status_code == 409
+    assert patients.call_count == 0
+
+
+def test_a_save_with_neither_a_patient_nor_a_new_patient_is_rejected(as_doctor):
+    body = _minimal_save()
+    body.pop("patient_id")
+    r = as_doctor.post("/scribe/save", json=body)
+    assert r.status_code == 400
+    assert "patient" in r.json()["detail"].lower()

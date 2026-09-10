@@ -29,7 +29,7 @@ a patient's first request. Everything else is optional and degrades gracefully.
 ## Commands
 
 ```bash
-uv run pytest -q                     # 366 tests (db tests skip without a database)
+uv run pytest -q                     # 388 tests (db tests skip without a database)
 uv run ruff check .
 
 # Database tests need a scratch PostgreSQL. They create and drop their own

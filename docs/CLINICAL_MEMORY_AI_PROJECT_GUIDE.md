@@ -816,13 +816,13 @@ single-instance prototype; a real deployment scrapes each instance.
 
 ## 21. Testing and CI
 
-**402 tests.**
+**426 tests.**
 
 | Suite | Count | Notes |
 |---|---|---|
-| Backend unit + integration | 277 | Supabase mocked at the HTTP boundary (respx) — everything between the request and the outbound call is production code |
-| Database | 89 | Real PostgreSQL, real migrations, no mocks |
-| Frontend | 36 | Vitest + Testing Library; component tests drive the real consultation page |
+| Backend unit + integration | 290 | Supabase mocked at the HTTP boundary (respx) — everything between the request and the outbound call is production code |
+| Database | 98 | Real PostgreSQL, real migrations, no mocks |
+| Frontend | 38 | Vitest + Testing Library; component tests drive the real consultation page |
 
 **The database tests build a fresh database from the committed migrations every
 run** — which is itself the test that the migrations reproduce the system. The
@@ -855,7 +855,7 @@ chain and its verifier. The provider-failover layer for both LLM and speech.
 JSON repair. Citation verification. The escalation-risk model, its features, its
 synthetic cohort, its calibration and its pure-Python inference. The
 longitudinal statistics. The completeness rubric. Every evaluation harness. The
-metrics layer. All 402 tests.
+metrics layer. All 426 tests.
 
 ### Not built here
 **Differential diagnosis, investigations and treatment recommendations.** These

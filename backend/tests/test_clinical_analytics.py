@@ -403,3 +403,40 @@ def test_hard_criteria_win_when_the_model_disagrees():
     combo = {"sym_chest_pain": 1.0, "sym_breathless": 1.0}
     assert "Chest pain with breathlessness" in risk.hard_criteria_met(combo)
     assert risk.hard_criteria_met({"sym_chest_pain": 1.0}) == []
+
+
+# ===================================================================== #
+# Feature matching across whitespace
+# ===================================================================== #
+@pytest.mark.parametrize("text", [
+    "Patient reports chest\npain radiating to the left arm",
+    "Patient reports chest  pain",
+    "- chest pain\n- sweating\n- breathlessness",
+    "chest\t pain",
+    "chest\r\npain",
+])
+def test_a_phrase_split_across_whitespace_still_matches(text):
+    """The HPI is model-generated prose and routinely contains newlines and
+    bullet lists. A doubled escape in the whitespace regex meant any multi-word
+    phrase straddling a line break was missed — which silently disabled the
+    deterministic red-flag criteria that depend on it."""
+    from app.ml.features import SYMPTOM_PATTERNS, _matches
+
+    assert _matches(text, SYMPTOM_PATTERNS["sym_chest_pain"]) is True
+
+
+def test_negation_still_wins_across_whitespace():
+    from app.ml.features import SYMPTOM_PATTERNS, _matches
+
+    assert _matches("no chest\npain", SYMPTOM_PATTERNS["sym_chest_pain"]) is False
+
+
+def test_a_multiline_hpi_reaches_the_hard_criteria():
+    """End-to-end version of the same bug: the criterion must fire on prose."""
+    result = risk.assess({
+        "age": 58,
+        "complaints": [{"text": "unwell"}],
+        "hpi": "Patient describes chest\npain since this morning.\nAlso reports breathlessness\non exertion.",
+    })
+    assert "Chest pain with breathlessness" in result["hard_criteria_met"]
+    assert result["escalate"] is True
