@@ -1,748 +1,339 @@
-"""AI Clinical Scribe — a background conversation listener.
+"""The AI scribe: audio in, a physician-reviewable draft out.
 
-  POST /scribe/transcribe  — audio (multipart) -> transcript          (Sarvam STT)
-  POST /scribe/soap        — transcript -> doctor/patient dialogue,
-                             SOAP note, entities, follow-up questions  (Gemini)
-  POST /scribe/save        — save the reviewed visit to a patient
-                             (existing or new) with today's date.
+    POST /scribe/transcribe  audio (multipart) -> transcript          (STT chain)
+    POST /scribe/live        running transcript -> live assistance    (LLM chain)
+    POST /scribe/extract     transcript -> structured encounter + verified evidence
+    POST /scribe/soap        transcript -> full SOAP note
+    POST /scribe/save        the reviewed encounter -> one atomic database write
 
-Everything AI produces is a draft the physician reviews before saving.
+Nothing here writes a clinical fact on its own. `/scribe/save` is the only
+route that touches the record, and it delegates to `finalize_visit()` in the
+database, which enforces attestation, role and optimistic locking in a single
+transaction — so the guarantees hold even if this code is wrong.
 """
-import asyncio
-import json
+from __future__ import annotations
+
+import logging
 import re
-from datetime import date, datetime, timezone
 
-import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ..deps import CurrentUser, get_current_user
+from ...ai import citations, prompts, providers, stt
+from ...clinical import completeness, risk
+from ...core.budget import budget
 from ...core.config import get_settings
-from ...core.supabase import audit, rest, user_headers
+from ...core.metrics import registry
+from ...core.supabase import rpc, user_headers
+from ..deps import CurrentUser, get_current_user
 
+log = logging.getLogger("scribe")
 router = APIRouter(prefix="/scribe")
-
-SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
-OPENAI_STT_URL = "https://api.openai.com/v1/audio/transcriptions"
-GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
-
-
-# --------------------------------------------------------------------- #
-# Speech-to-text — OpenAI gpt-4o-transcribe (preferred), Sarvam fallback
-# --------------------------------------------------------------------- #
-async def _stt_openai(s, filename: str, audio: bytes, content_type: str) -> dict:
-    files = {"file": (filename, audio, content_type)}
-    data = {"model": s.openai_stt_model, "response_format": "json"}
-    async with httpx.AsyncClient(timeout=180) as client:
-        r = await client.post(OPENAI_STT_URL, headers={"Authorization": f"Bearer {s.openai_api_key}"},
-                              data=data, files=files)
-    if r.status_code != 200:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"STT error {r.status_code}: {r.text[:300]}")
-    return {"transcript": r.json().get("text", ""), "language": None}
-
-
-async def _stt_sarvam(s, filename: str, audio: bytes, content_type: str) -> dict:
-    files = {"file": (filename, audio, content_type)}
-    data = {"model": s.sarvam_stt_model, "language_code": s.sarvam_stt_language}
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(SARVAM_STT_URL, headers={"api-subscription-key": s.sarvam_api_key},
-                              data=data, files=files)
-    if r.status_code != 200:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"STT error {r.status_code}: {r.text[:300]}")
-    body = r.json()
-    return {"transcript": body.get("transcript", ""), "language": body.get("language_code")}
-
-
-@router.post("/transcribe")
-async def transcribe(file: UploadFile = File(...), user: CurrentUser = Depends(get_current_user)):
-    s = get_settings()
-    if not s.openai_api_key and not s.sarvam_api_key:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
-                            "No speech-to-text provider configured (set OPENAI_API_KEY or SARVAM_API_KEY).")
-    audio = await file.read()
-    fname = file.filename or "audio.wav"
-    ctype = file.content_type or "audio/wav"
-    try:
-        if s.openai_api_key:
-            return await _stt_openai(s, fname, audio, ctype)
-        return await _stt_sarvam(s, fname, audio, ctype)
-    except httpx.HTTPError as e:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"STT request failed: {e}")
-
-
-# --------------------------------------------------------------------- #
-# Analysis: dialogue + SOAP + entities + follow-up questions (Gemini)
-# --------------------------------------------------------------------- #
-class SoapRequest(BaseModel):
-    transcript: str
-    patient_context: str | None = None
-    mode: str = "interim"  # "interim" (SOAP + follow-ups) | "final" (complete note, no questions)
-
-
-_SYSTEM = (
-    "You are an AI clinical documentation assistant listening to a doctor-patient "
-    "consultation (which may mix Hindi and English / Hinglish). You are NOT a doctor and "
-    "never diagnose or prescribe. From the transcript you must: (1) reconstruct the "
-    "conversation as a back-and-forth, labelling each turn as the doctor or the patient "
-    "(the doctor asks questions and gives advice; the patient describes symptoms and answers); "
-    "(2) write a concise SOAP note in clinical English based on that exchange; "
-    "(3) extract key entities; (4) suggest follow-up questions the doctor could ask to clarify "
-    "or rule out serious conditions; (5) produce PHYSICIAN-REVIEW-ONLY clinical considerations: "
-    "red-flag findings (symptoms/signs that could indicate a serious or emergent condition and "
-    "warrant urgent attention), missing information the history is lacking, and investigations "
-    "the doctor could consider. These considerations are decision-support prompts for the "
-    "physician — they are NEVER a diagnosis or an order. Base everything on the transcript AND "
-    "the provided patient history/context — you may reference relevant known history (conditions, "
-    "current medications, allergies, recurring issues) to make the note continuity-aware — but "
-    "never invent facts beyond what the transcript and context provide. Everything is for "
-    "physician review only. Return STRICT JSON."
-)
-
-
-def _prompt(transcript: str, context: str, mode: str) -> str:
-    if mode == "final":
-        mode_note = (
-            "This is the FINAL, COMPLETE note for the ENTIRE consultation (the transcript spans "
-            "the whole visit, possibly across several recorded segments). Produce a thorough "
-            "record: full subjective history, all objective findings mentioned, a bulleted "
-            "assessment, and a COMPLETE plan INCLUDING any medications/prescriptions and advice "
-            "discussed. Return an EMPTY follow_up_questions array — no more questions."
-        )
-    else:
-        mode_note = (
-            "This is an INTERIM note during an ONGOING consultation. Summarise everything so far "
-            "and provide 3-5 follow-up suggestions the doctor could still explore."
-        )
-    return f"""{_SYSTEM}
-
-{mode_note}
-
-PATIENT CONTEXT (may be empty):
-{context or "(none)"}
-
-CONSULTATION TRANSCRIPT (may combine several recorded segments):
-{transcript}
-
-Return JSON with exactly this shape:
-{{
-  "dialogue": [{{"speaker": "doctor" | "patient", "text": ""}}],
-  "soap": {{"subjective": "", "objective": "", "assessment": "", "plan": ""}},
-  "entities": {{"symptoms": [], "medications": [], "allergies": [], "diagnoses": [], "follow_up": []}},
-  "follow_up_questions": [
-    {{"question": "", "concern": "what this probes / could reveal",
-      "likelihood_pct": 0, "severity": "low" | "moderate" | "high"}}
-  ],
-  "clinical_considerations": {{
-    "red_flags": [
-      {{"finding": "the concerning symptom/sign from THIS consultation or history",
-        "concern": "the serious condition it could indicate",
-        "urgency": "emergency" | "urgent" | "routine",
-        "action": "brief suggested action for the physician to consider"}}
-    ],
-    "missing_information": [""],
-    "suggested_investigations": [{{"test": "", "rationale": ""}}],
-    "completeness_pct": 0
-  }}
-}}
-
-Formatting rules:
-- "assessment": write as SHORT bullet points for fast reading — each line begins with "- ",
-  terse phrases (a brief differential + key uncertainties). NOT a paragraph.
-- "subjective", "objective", "plan": concise prose.
-- Each follow-up "question": phrase it as a brief INSTRUCTION to the doctor, starting with
-  "Ask about", "Ask for", "Check for", or "Assess" (e.g. "Ask about shortness of breath at rest").
-  Do NOT write it as a verbatim question to the patient.
-- clinical_considerations.red_flags: ONLY include genuine red flags actually supported by the
-  transcript/history (e.g. chest pain/pressure, breathlessness at rest, neuro deficits, severe
-  or worsening pain, bleeding, high fever with stiff neck, etc.). Be STRICT: only list a red flag
-  that fits the body system/region actually involved. For a minor, localised complaint (e.g. a
-  simple ankle sprain, common cold, mild rash) return an EMPTY array — do NOT manufacture red
-  flags or list conditions unrelated to the presentation. Keep "action" short (<= 15 words).
-  "urgency": "emergency" = needs same-day/ED attention; "urgent" = review soon; "routine" = worth noting.
-- "missing_information": key history/exam items not yet covered that a thorough physician would
-  want (brief phrases). "suggested_investigations": tests the physician could CONSIDER, each with
-  a one-line rationale — never phrased as an order.
-- "completeness_pct" (0-100): how complete this consultation record looks (history depth, red-flag
-  screening, exam, plan).
-Provide 3-5 follow-ups. likelihood_pct (0-100) = how clinically important it is, given the
-presentation. Do not invent findings. Empty strings/arrays where unknown. Everything in
-clinical_considerations is PHYSICIAN-REVIEW-ONLY assistance, not a diagnosis or prescription."""
-
-
-def _salvage_json(text: str) -> dict | None:
-    """Best-effort recovery of a JSON object from possibly-truncated / fenced text."""
-    t = text.strip()
-    if t.startswith("```"):  # strip ```json ... ``` fences
-        t = t.split("```", 2)[1] if t.count("```") >= 2 else t.lstrip("`")
-        if t.lower().startswith("json"):
-            t = t[4:]
-        t = t.strip().rstrip("`").strip()
-    try:
-        return json.loads(t)
-    except json.JSONDecodeError:
-        pass
-    # Truncated mid-object: keep from first "{" and repair the tail.
-    start = t.find("{")
-    if start == -1:
-        return None
-    frag = t[start:]
-    # If we're inside an unterminated string, close it (count unescaped quotes).
-    quotes = sum(1 for i, c in enumerate(frag) if c == '"' and (i == 0 or frag[i - 1] != "\\"))
-    if quotes % 2 == 1:
-        frag += '"'
-    # Drop a dangling trailing comma before closing.
-    frag = frag.rstrip()
-    if frag.endswith(","):
-        frag = frag[:-1]
-    depth_arr = frag.count("[") - frag.count("]")
-    if depth_arr > 0:
-        frag += "]" * depth_arr
-    depth_obj = frag.count("{") - frag.count("}")
-    if depth_obj > 0:
-        frag += "}" * depth_obj
-    try:
-        return json.loads(frag)
-    except json.JSONDecodeError:
-        return None
-
-
-def _parse_gemini_json(body: dict) -> dict | None:
-    """Pull the JSON object out of a Gemini response, tolerating fences,
-    multi-part text, and truncation."""
-    try:
-        cand = (body.get("candidates") or [])[0]
-        parts = ((cand.get("content") or {}).get("parts")) or []
-        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
-    except (IndexError, AttributeError, TypeError):
-        return None
-    if not text.strip():
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return _salvage_json(text)
-
-
-@router.post("/soap")
-async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user)):
-    s = get_settings()
-    if not s.gemini_api_key:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "GEMINI_API_KEY not configured")
-    if len(body.transcript.strip()) < 3:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Transcript is empty")
-
-    payload = {
-        "contents": [{"parts": [{"text": _prompt(body.transcript, body.patient_context or "", body.mode)}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.2,
-            # Final notes are longer; without a generous cap the JSON can be
-            # truncated mid-object, which then fails to parse.
-            "maxOutputTokens": 8192,
-        },
-    }
-
-    # Gemini free tier intermittently returns 503 (model overloaded) or 429 (rate
-    # limit). These are transient. Strategy: retry with exponential backoff AND
-    # rotate through fallback models so a single overloaded model can't block the
-    # note. The configured model is tried first; extras are de-duped.
-    _FALLBACKS = ["gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"]
-    models: list[str] = []
-    for m in [s.gemini_model, *_FALLBACKS]:
-        if m and m not in models:
-            models.append(m)
-
-    r = None
-    last_err = ""
-    overloaded = False
-    async with httpx.AsyncClient(timeout=60) as client:
-        for attempt, model in enumerate(models):
-            url = f"{GEMINI_BASE}/models/{model}:generateContent"
-            try:
-                r = await client.post(url, params={"key": s.gemini_api_key}, json=payload)
-            except httpx.HTTPError as e:
-                last_err = f"SOAP request failed: {e}"
-                r = None
-            else:
-                if r.status_code == 200:
-                    break
-                last_err = f"SOAP error {r.status_code} ({model}): {r.text[:300]}"
-                overloaded = r.status_code in (429, 503)
-                if r.status_code not in (429, 500, 502, 503, 504):
-                    break  # non-transient (bad key, bad request) — stop early
-            if attempt < len(models) - 1:
-                await asyncio.sleep(1.5 * (attempt + 1))  # brief pause before next model
-
-    if r is None or r.status_code != 200:
-        detail = last_err or "SOAP request failed"
-        if overloaded:
-            detail = "The AI models are briefly overloaded. Please press Analyse again in a few seconds."
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail)
-    data = _parse_gemini_json(r.json())
-    if data is None:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY,
-                            "The AI could not produce a clean note this time. Please press "
-                            "Analyse/Finalise again.")
-
-    so = data.get("soap") or {}
-    ent = data.get("entities") or {}
-    entities = {k: ent.get(k, []) for k in ("symptoms", "medications", "allergies", "diagnoses", "follow_up")}
-    fups = [] if body.mode == "final" else [
-        {
-            "question": q.get("question", ""),
-            "concern": q.get("concern", ""),
-            "likelihood_pct": max(0, min(100, int(q.get("likelihood_pct") or 0))),
-            "severity": q.get("severity", "low"),
-        }
-        for q in (data.get("follow_up_questions") or []) if isinstance(q, dict) and q.get("question")
-    ]
-
-    considerations = _considerations(data.get("clinical_considerations"))
-    # Red flags come from the model's contextual reasoning only. The broad KB
-    # fuzzy-matcher (kb_ground_red_flags) was retired here — it surfaced conditions
-    # unrelated to the presentation (e.g. liver cancer for an ankle sprain). the synthesis service's
-    # must-not-miss (decision-support panel) is the grounded safety net now.
-    considerations["red_flags"] = _trim_flags(considerations["red_flags"], keep=4, action_max=200)
-    # De-duplicate follow-ups against the red flags and sort by severity.
-    fups = _dedupe_followups(fups, considerations["red_flags"])
-
-    return {
-        "dialogue": [d for d in (data.get("dialogue") or []) if isinstance(d, dict) and d.get("text")],
-        "soap": {k: so.get(k, "") for k in ("subjective", "objective", "assessment", "plan")},
-        "entities": entities,
-        "follow_up_questions": fups,
-        "clinical_considerations": considerations,
-    }
-
 
 _URGENCY = {"emergency", "urgent", "routine"}
 _URG_RANK = {"emergency": 0, "urgent": 1, "routine": 2}
 _SEV_RANK = {"high": 0, "moderate": 1, "low": 2}
 
-
-def _trim_flags(flags: list[dict], keep: int = 4, action_max: int = 200) -> list[dict]:
-    """Cap the number of red flags and truncate their text so the panel stays
-    scannable instead of dumping walls of text."""
-    out = []
-    for f in flags[:keep]:
-        f["action"] = (f.get("action") or "")[:action_max]
-        f["concern"] = (f.get("concern") or "")[:160]
-        out.append(f)
-    return out
-_STOP = {"about", "ask", "for", "the", "and", "any", "check", "assess", "with", "your",
-         "patient", "possible", "consider", "rule", "out", "screen", "signs", "symptoms",
-         "history", "this", "that", "from", "have", "been", "such", "other"}
-
-
-def _rf_order(x: dict) -> tuple:
-    # KB-grounded first within same urgency (curated = more trustworthy), then AI.
-    return (_URG_RANK.get(x.get("urgency"), 3), 0 if x.get("source") == "kb" else 1)
-
-
-def _kw(text: str) -> set[str]:
-    """Significant word tokens for cheap overlap-based de-duplication."""
-    return {w for w in re.findall(r"[a-z]+", (text or "").lower()) if len(w) > 3 and w not in _STOP}
-
-
-def _grounded_urgency(acuity: str | None, cant_miss: bool) -> str:
-    """Loud for genuine can't-miss, quiet otherwise — controls alarm fatigue."""
-    a = (acuity or "").lower()
-    if cant_miss and any(k in a for k in ("emerg", "critical", "life")):
-        return "emergency"
-    if cant_miss:
-        return "urgent"
-    return "routine"  # red-flag-bearing but not flagged can't-miss → gentle note
-
-
-def _considerations(c: object) -> dict:
-    """Normalise the physician-review-only considerations block."""
-    c = c if isinstance(c, dict) else {}
-    red_flags = []
-    for f in (c.get("red_flags") or []):
-        if not isinstance(f, dict) or not f.get("finding"):
-            continue
-        u = str(f.get("urgency", "routine")).lower()
-        red_flags.append({
-            "finding": str(f.get("finding", "")).strip(),
-            "concern": str(f.get("concern", "")).strip(),
-            "urgency": u if u in _URGENCY else "routine",
-            "action": str(f.get("action", "")).strip(),
-            "source": "ai",
-        })
-    red_flags.sort(key=_rf_order)
-    investigations = [
-        {"test": str(i.get("test", "")).strip(), "rationale": str(i.get("rationale", "")).strip()}
-        for i in (c.get("suggested_investigations") or [])
-        if isinstance(i, dict) and i.get("test")
-    ]
-    missing = [str(m).strip() for m in (c.get("missing_information") or []) if str(m).strip()]
-    try:
-        pct = max(0, min(100, int(c.get("completeness_pct") or 0)))
-    except (TypeError, ValueError):
-        pct = 0
-    return {
-        "red_flags": red_flags,
-        "missing_information": missing,
-        "suggested_investigations": investigations,
-        "completeness_pct": pct,
-    }
-
-
-# --------------------------------------------------------------------- #
-# KB grounding: curated red flags from the ICMR-derived knowledge base
-# --------------------------------------------------------------------- #
-_ABBREV = {
-    "sob": "breathlessness", "shortness of breath": "breathlessness",
-    "short of breath": "breathlessness", "cp": "chest pain",
-    "loc": "loss of consciousness", "abd pain": "abdominal pain",
+# Audio container types the providers accept. Anything else is rejected before
+# it reaches a paid API, both to save spend and because an unbounded
+# content-type is an easy way to probe an upstream.
+_AUDIO_TYPES = {
+    "audio/wav", "audio/x-wav", "audio/wave", "audio/webm", "audio/ogg",
+    "audio/mpeg", "audio/mp3", "audio/mp4", "audio/m4a", "audio/x-m4a",
+    "audio/flac", "video/webm",
 }
 
 
-def _norm_symptom(s: str) -> str:
-    t = re.sub(r"\b(mild|severe|acute|chronic|slight|a lot of|some|very|feeling|feel)\b", "", s.lower())
-    t = t.strip(" .,-")
-    return _ABBREV.get(t, t)
-
-
-async def kb_ground_red_flags(symptoms: list[str], token: str) -> list[dict]:
-    """Ask the KB which CAN'T-MISS conditions these symptoms point at, and
-    surface each one's curated red-flag features as a grounded red flag."""
-    findings = sorted({_norm_symptom(s) for s in symptoms if len(_norm_symptom(s)) >= 3})
-    if not findings:
-        return []
-    try:
-        resp = await rest("POST", "rpc/kb_ground_red_flags",
-                          headers=user_headers(token), json={"findings": findings})
-    except httpx.HTTPError:
-        return []
-    if resp.status_code != 200:
-        return []
-    rows = resp.json() or []
-
-    by_cond: dict[str, dict] = {}
-    for r in rows:
-        cid = r.get("condition_id")
-        if not cid:
-            continue
-        c = by_cond.setdefault(cid, {
-            "name": r.get("condition_name", ""),
-            "acuity": r.get("acuity"),
-            "prevalence": r.get("prevalence_tier"),
-            "cant_miss": bool(r.get("any_cantmiss")),
-            "matched": r.get("matched_count") or 0,
-            "score": float(r.get("score") or 0),
-            "features": [], "actions": [],
-        })
-        lbl = (r.get("redflag_label") or "").strip()
-        if lbl and lbl.lower() not in {x.lower() for x in c["features"]}:
-            c["features"].append(lbl)
-        act = (r.get("action") or "").strip()
-        if act and act.lower() not in {x.lower() for x in c["actions"]}:
-            c["actions"].append(act)
-
-    grounded: list[dict] = []
-    # can't-miss first, then by term-specificity score (v3), then match breadth
-    ranked = sorted(by_cond.items(),
-                    key=lambda kv: (not kv[1]["cant_miss"], -kv[1]["score"], -kv[1]["matched"]))
-    for cid, c in ranked[:4]:
-        feats = ", ".join(c["features"][:5])
-        action = "; ".join(c["actions"][:2]) if c["actions"] else ""
-        if feats:
-            action = (f"Screen for: {feats}." + (f" {action}" if action else "")).strip()
-        concern = ("Can't-miss condition matched to the presenting symptoms (ICMR KB)."
-                   if c["cant_miss"] else
-                   "Condition with red-flag features matched to the symptoms (ICMR KB).")
-        grounded.append({
-            "finding": f"Rule out {c['name']}",
-            "concern": concern,
-            "urgency": _grounded_urgency(c["acuity"], c["cant_miss"]),
-            "action": action or f"Consider features of {c['name']}.",
-            "source": "kb",
-        })
-    return grounded
-
-
-_NAME_GENERIC = {"acute", "chronic", "syndrome", "disease", "disorder", "infection",
-                 "primary", "secondary", "possible", "suspected"}
-
-
-def _merge_considerations(cc: dict, grounded: list[dict]) -> dict:
-    """Put curated KB red flags first, then AI red flags that add something new."""
-    if not grounded:
-        return cc
-    # Specific condition-name tokens from the KB flags (e.g. "meningitis",
-    # "coronary") — a single shared one signals the AI flag is the same concern.
-    kb_name_kw = set()
-    for g in grounded:
-        name = re.sub(r"^\s*rule out\s+", "", g["finding"], flags=re.IGNORECASE)
-        kb_name_kw |= (_kw(name) - _NAME_GENERIC)
-    ai_kept = []
-    for rf in cc.get("red_flags", []):
-        ai_kw = _kw(rf["finding"]) | _kw(rf["concern"])
-        if ai_kw & kb_name_kw:      # same underlying condition already covered by KB
-            continue
-        ai_kept.append(rf)
-    merged = grounded + ai_kept
-    merged.sort(key=_rf_order)
-    cc["red_flags"] = merged
-    return cc
-
-
-def _dedupe_followups(fups: list[dict], red_flags: list[dict]) -> list[dict]:
-    """Remove follow-ups that just restate a red flag, then sort by severity."""
-    rf_kw = [(_kw(rf["finding"]) | _kw(rf["action"])) for rf in red_flags]
-    kept = []
-    for q in fups:
-        qk = _kw(q.get("question", "")) | _kw(q.get("concern", ""))
-        if any(len(qk & k) >= 2 for k in rf_kw):
-            continue
-        kept.append(q)
-    kept.sort(key=lambda q: (_SEV_RANK.get(str(q.get("severity", "low")).lower(), 3),
-                             -int(q.get("likelihood_pct") or 0)))
-    return kept
+def _budget_guard() -> None:
+    if budget.exhausted():
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "The daily AI budget for this instance is exhausted. Documentation still works; "
+            "AI assistance resumes tomorrow or when the budget is raised.",
+        )
 
 
 # --------------------------------------------------------------------- #
-# Live consultation — fast, low-latency pass over the running transcript
+# Speech to text
+# --------------------------------------------------------------------- #
+@router.post("/transcribe")
+async def transcribe(file: UploadFile = File(...), user: CurrentUser = Depends(get_current_user)):
+    s = get_settings()
+    if not stt.providers():
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "No speech-to-text provider configured (set OPENAI_API_KEY or SARVAM_API_KEY).",
+        )
+    _budget_guard()
+
+    ctype = (file.content_type or "audio/wav").split(";")[0].strip().lower()
+    if ctype not in _AUDIO_TYPES:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                            f"Unsupported audio type '{ctype}'.")
+
+    # Read with a ceiling rather than `await file.read()`. The unbounded read
+    # let one request pull an arbitrary payload fully into memory before any
+    # check ran, which is a trivial denial of service on a single-instance API.
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(1 << 20):
+        total += len(chunk)
+        if total > s.max_audio_bytes:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"Audio exceeds the {s.max_audio_bytes // (1024 * 1024)} MB limit.",
+            )
+        chunks.append(chunk)
+    audio = b"".join(chunks)
+    if not audio:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Empty audio upload.")
+
+    try:
+        result = await stt.transcribe(audio, filename=file.filename or "audio.wav", content_type=ctype)
+    except stt.AllSTTFailed as e:
+        log.error("stt_failed", extra={"extra_fields": {"attempts": e.attempts}})
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Speech-to-text is unavailable right now. Your recording was not lost — "
+            "press record again, or type the note manually.",
+        ) from None
+
+    budget.record(result.cost_usd)
+    return {
+        "transcript": result.text,
+        "language": result.language,
+        "provider": result.provider,
+        "fell_back": result.fell_back,
+    }
+
+
+# --------------------------------------------------------------------- #
+# Live assistance
 # --------------------------------------------------------------------- #
 class LiveRequest(BaseModel):
-    transcript: str
-    patient_context: str | None = None
-
-
-def _live_prompt(context: str, transcript: str) -> str:
-    return (
-        "You are a live clinical documentation assistant listening to an ongoing doctor-patient "
-        "consultation that may mix Hindi and English (Hinglish). You are NOT a doctor and never "
-        "diagnose or prescribe. Work fast. From the running transcript so far, return STRICT JSON:\n"
-        '{\n'
-        '  "translation": "a clean ENGLISH translation/paraphrase of the conversation so far (concise)",\n'
-        '  "symptoms": ["key presenting symptoms mentioned so far"],\n'
-        '  "red_flags": [{"finding":"the concerning symptom/sign","concern":"serious condition it could indicate",'
-        '"urgency":"emergency|urgent|routine","action":"one short suggested action (<= 12 words)"}],\n'
-        '  "questions": [{"question":"a brief instruction to the doctor starting with Ask/Check/Assess",'
-        '"severity":"low|moderate|high"}]\n'
-        "}\n"
-        "RED FLAGS — be strict: include ONLY genuine danger signs that actually FIT this "
-        "presentation and are supported by the transcript (e.g. chest pain, breathlessness at rest, "
-        "neuro deficits, severe/worsening pain, bleeding). If the complaint is minor/localised "
-        "(e.g. a simple ankle sprain, common cold), return an EMPTY red_flags array. Never list a "
-        "condition that doesn't match the body system involved. Keep every field short. "
-        "Give 2-4 questions. Everything is physician-review-only. Do not invent facts.\n\n"
-        f"PATIENT CONTEXT (may be empty):\n{context or '(none)'}\n\n"
-        f"RUNNING TRANSCRIPT:\n{transcript}"
-    )
-
-
-async def _gemini_json(prompt: str, max_tokens: int = 2048) -> dict | None:
-    """Compact Gemini JSON call with model fallback — used by the live lane."""
-    s = get_settings()
-    if not s.gemini_api_key:
-        return None
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2, "maxOutputTokens": max_tokens},
-    }
-    models: list[str] = []
-    for m in [s.gemini_model, "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"]:
-        if m and m not in models:
-            models.append(m)
-    async with httpx.AsyncClient(timeout=30) as client:
-        for attempt, model in enumerate(models):
-            url = f"{GEMINI_BASE}/models/{model}:generateContent"
-            try:
-                r = await client.post(url, params={"key": s.gemini_api_key}, json=payload)
-            except httpx.HTTPError:
-                r = None
-            else:
-                if r.status_code == 200:
-                    return _parse_gemini_json(r.json())
-                if r.status_code not in (429, 500, 502, 503, 504):
-                    break
-            if attempt < len(models) - 1:
-                await asyncio.sleep(1.0 * (attempt + 1))
-    return None
+    transcript: str = Field(max_length=200_000)
+    patient_context: str | None = Field(default=None, max_length=8_000)
 
 
 @router.post("/live")
 async def live(body: LiveRequest, user: CurrentUser = Depends(get_current_user)):
     if len(body.transcript.strip()) < 3:
         return {"translation": "", "symptoms": [], "red_flags": [], "questions": []}
-    data = await _gemini_json(_live_prompt(body.patient_context or "", body.transcript), 2048) or {}
-    symptoms = [str(x).strip() for x in (data.get("symptoms") or []) if str(x).strip()][:10]
-    # Contextual red flags from the model ONLY — the broad KB fuzzy-matcher
-    # surfaced irrelevant conditions (e.g. liver cancer for an ankle sprain), so
-    # it's intentionally not used in the live lane. Keep it tight: top 3, short.
-    cc = _considerations({"red_flags": data.get("red_flags"), "completeness_pct": 0})
+    _budget_guard()
+
+    try:
+        result = await providers.generate_json(
+            prompts.live(body.patient_context or "", _cap(body.transcript)),
+            capability="live", max_tokens=2048, timeout=30.0,
+        )
+    except providers.AllProvidersFailed:
+        # Fail open. Losing live suggestions must never interrupt a
+        # consultation in progress; the physician keeps working, and the panel
+        # says the assistant is unavailable rather than showing a stale answer.
+        return {"translation": "", "symptoms": [], "red_flags": [], "questions": [],
+                "available": False}
+
+    budget.record(result.cost_usd)
+    data = result.data
+    considerations = normalise_considerations({"red_flags": data.get("red_flags")})
     red_flags = []
-    for rf in cc["red_flags"][:3]:
+    for rf in considerations["red_flags"][:3]:
         rf["action"] = (rf.get("action") or "")[:140]
         rf["concern"] = (rf.get("concern") or "")[:120]
         red_flags.append(rf)
-    questions = [
-        {"question": str(q.get("question", "")).strip()[:160],
-         "severity": str(q.get("severity", "low")).strip().lower()}
-        for q in (data.get("questions") or []) if isinstance(q, dict) and q.get("question")
-    ][:4]
+
     return {
+        "available": True,
         "translation": str(data.get("translation", "")).strip(),
-        "symptoms": symptoms,
+        "symptoms": _string_list(data.get("symptoms"))[:10],
         "red_flags": red_flags,
-        "questions": questions,
+        "questions": [
+            {"question": str(q.get("question", "")).strip()[:160],
+             "severity": str(q.get("severity", "low")).strip().lower()}
+            for q in (data.get("questions") or []) if isinstance(q, dict) and q.get("question")
+        ][:4],
+        "provider": result.provider,
     }
 
 
 # --------------------------------------------------------------------- #
-# Structured encounter extraction — fills the consultation wizard fields
+# Structured extraction — the lane whose evidence is verified
 # --------------------------------------------------------------------- #
 class ExtractRequest(BaseModel):
-    transcript: str
-    patient_context: str | None = None
+    transcript: str = Field(max_length=200_000)
+    patient_context: str | None = Field(default=None, max_length=8_000)
 
 
-def _extract_prompt(context: str, transcript: str) -> str:
-    return (
-        "You are a clinical documentation assistant. From the doctor-patient consultation "
-        "transcript (which may mix Hindi and English), extract a STRUCTURED encounter in clinical "
-        "English. You are NOT a doctor; do not diagnose or prescribe. Return STRICT JSON:\n"
-        '{\n'
-        '  "chief_complaints": [{"text":"symptom in a few words","duration":"e.g. 2 days or empty",'
-        '"evidence":"the VERBATIM words from the transcript that support this, copied exactly"}],\n'
-        '  "hpi": "history of present illness, concise clinical prose",\n'
-        '  "past_history": "", "allergies": "", "medications": "current medications",\n'
-        '  "general_exam": "general examination findings if mentioned",\n'
-        '  "systemic_exam": "systemic examination findings if mentioned",\n'
-        '  "vitals": {"bp":"e.g. 120/80","hr":"","temp":"","spo2":"","rr":"","weight":"","height":""},\n'
-        '  "evidence": {"hpi":"verbatim quote","past_history":"","allergies":"","medications":"",'
-        '"general_exam":"","systemic_exam":"","vitals":"verbatim quote for the vitals"}\n'
-        "}\n"
-        "Only fill fields actually supported by the transcript; use empty string / empty array "
-        "otherwise. Do NOT invent findings or vitals. Every 'evidence' value MUST be text copied "
-        "word-for-word from the transcript (not paraphrased) so the doctor can verify it. Keep it "
-        "faithful to what was said.\n\n"
-        f"PATIENT CONTEXT (may be empty):\n{context or '(none)'}\n\n"
-        f"TRANSCRIPT:\n{transcript}"
-    )
+_EVIDENCE_FIELDS = ("hpi", "past_history", "allergies", "medications",
+                    "general_exam", "systemic_exam", "vitals")
+_VITAL_KEYS = ("bp", "hr", "temp", "spo2", "rr", "weight", "height")
 
 
-def _verify_quote(quote: str, haystack: str) -> str:
-    """Return the quote only if it genuinely appears in the transcript (loose,
-    whitespace-insensitive match). Drops hallucinated citations so a shown quote
-    is always real evidence the doctor can trust."""
-    q = " ".join(str(quote or "").split()).strip()
-    if len(q) < 4:
-        return ""
-    return q if q.lower() in " ".join(haystack.split()).lower() else ""
+def _empty_extract() -> dict:
+    return {"chief_complaints": [], "hpi": "", "past_history": "", "allergies": "",
+            "medications": "", "general_exam": "", "systemic_exam": "", "vitals": {},
+            "evidence": {}, "grounding": citations.coverage({}, {}), "available": False}
 
 
 @router.post("/extract")
 async def extract(body: ExtractRequest, user: CurrentUser = Depends(get_current_user)):
-    empty = {"chief_complaints": [], "hpi": "", "past_history": "", "allergies": "",
-             "medications": "", "general_exam": "", "systemic_exam": "", "vitals": {}, "evidence": {}}
     if len(body.transcript.strip()) < 3:
-        return empty
-    data = await _gemini_json(_extract_prompt(body.patient_context or "", body.transcript), 4096)
-    if not data:
-        return empty
-    tx = body.transcript
-    cc = []
+        return _empty_extract()
+    _budget_guard()
+
+    transcript = _cap(body.transcript)
+    try:
+        result = await providers.generate_json(
+            prompts.extract(body.patient_context or "", transcript),
+            capability="extract", max_tokens=4096, timeout=45.0,
+        )
+    except providers.AllProvidersFailed:
+        return _empty_extract()
+
+    budget.record(result.cost_usd)
+    data = result.data
+
+    complaints = []
     for c in (data.get("chief_complaints") or []):
         if isinstance(c, dict) and c.get("text"):
-            cc.append({"text": str(c["text"]).strip()[:120],
-                       "duration": str(c.get("duration", "")).strip()[:40],
-                       "evidence": _verify_quote(c.get("evidence", ""), tx)[:200]})
+            complaints.append({
+                "text": str(c["text"]).strip()[:120],
+                "duration": str(c.get("duration", "")).strip()[:40],
+                "evidence": citations.verify_or_drop(c.get("evidence", ""), transcript)[:200],
+            })
         elif isinstance(c, str) and c.strip():
-            cc.append({"text": c.strip()[:120], "duration": "", "evidence": ""})
-    v = data.get("vitals") if isinstance(data.get("vitals"), dict) else {}
-    vitals = {k: str(v.get(k, "")).strip() for k in ("bp", "hr", "temp", "spo2", "rr", "weight", "height") if str(v.get(k, "")).strip()}
-    ev_in = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
-    evidence = {k: _verify_quote(ev_in.get(k, ""), tx)[:200]
-                for k in ("hpi", "past_history", "allergies", "medications", "general_exam", "systemic_exam", "vitals")}
-    evidence = {k: q for k, q in evidence.items() if q}      # keep only verified quotes
-    return {
-        "chief_complaints": cc[:10],
-        "hpi": str(data.get("hpi", "")).strip(),
-        "past_history": str(data.get("past_history", "")).strip(),
-        "allergies": str(data.get("allergies", "")).strip(),
-        "medications": str(data.get("medications", "")).strip(),
-        "general_exam": str(data.get("general_exam", "")).strip(),
-        "systemic_exam": str(data.get("systemic_exam", "")).strip(),
+            complaints.append({"text": c.strip()[:120], "duration": "", "evidence": ""})
+
+    raw_vitals = data.get("vitals") if isinstance(data.get("vitals"), dict) else {}
+    vitals = {k: str(raw_vitals.get(k, "")).strip() for k in _VITAL_KEYS if str(raw_vitals.get(k, "")).strip()}
+
+    fields = {k: str(data.get(k, "")).strip() for k in _EVIDENCE_FIELDS if k != "vitals"}
+    raw_evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    evidence = {}
+    for key in _EVIDENCE_FIELDS:
+        verified = citations.verify_or_drop(raw_evidence.get(key, ""), transcript)[:200]
+        if verified:
+            evidence[key] = verified
+
+    payload = {
+        "chief_complaints": complaints[:10],
+        **fields,
         "vitals": vitals,
         "evidence": evidence,
+        # How much of what the model filled in is actually backed by words the
+        # microphone heard. Shown to the physician, and exported as a metric.
+        "grounding": citations.coverage(
+            {**fields, "vitals": " ".join(vitals.values())}, evidence
+        ),
+        "available": True,
+        "provider": result.provider,
+        "repaired_json": result.repaired,
     }
+    payload["completeness"] = completeness.score(payload)
+    return payload
 
 
 # --------------------------------------------------------------------- #
-# clinical_facts: the append-only, doctor-provenance store that IS the
-# longitudinal patient memory. We write to it only when the doctor has
-# attested a completed note — so every fact is doctor-confirmed.
+# Full SOAP note
 # --------------------------------------------------------------------- #
-_ENTITY_FACTS = {"diagnoses": "diagnosis", "allergies": "allergy", "symptoms": "symptom"}
+class SoapRequest(BaseModel):
+    transcript: str = Field(max_length=200_000)
+    patient_context: str | None = Field(default=None, max_length=8_000)
+    mode: str = "interim"          # "interim" | "final"
 
 
-def _fact_rows(clinic_id, patient_id, visit_id, actor_id, now, *, entities, prescription, vitals):
-    rows: list[dict] = []
+@router.post("/soap")
+async def soap(body: SoapRequest, user: CurrentUser = Depends(get_current_user)):
+    if len(body.transcript.strip()) < 3:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Transcript is empty")
+    if not providers.candidates():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No LLM provider is configured")
+    _budget_guard()
 
-    def add(fact_type: str, value: str, structured: dict | None = None):
-        value = str(value or "").strip()
-        if not value:
-            return
-        rows.append({
-            "clinic_id": clinic_id, "patient_id": patient_id, "visit_id": visit_id,
-            "fact_type": fact_type, "value": value[:500], "structured": structured or {},
-            "source": "doctor_confirmed_ai", "status": "confirmed",
-            "asserted_by": actor_id, "asserted_at": now,
-        })
+    try:
+        result = await providers.generate_json(
+            prompts.soap(_cap(body.transcript), body.patient_context or "", body.mode),
+            capability="soap", max_tokens=8192, timeout=90.0,
+        )
+    except providers.AllProvidersFailed as e:
+        log.error("soap_failed", extra={"extra_fields": {"attempts": e.attempts}})
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "The AI could not produce a note this time. Press Analyse again, or write the "
+            "note manually — nothing has been lost.",
+        ) from None
 
-    ent = entities or {}
-    for key, ftype in _ENTITY_FACTS.items():
-        for item in (ent.get(key) or []):
-            if isinstance(item, dict):
-                add(ftype, item.get("value") or item.get("name") or item.get("text") or "", item)
-            else:
-                add(ftype, item)
+    budget.record(result.cost_usd)
+    data = result.data
+    so = data.get("soap") if isinstance(data.get("soap"), dict) else {}
+    entities_in = data.get("entities") if isinstance(data.get("entities"), dict) else {}
+    entities = {k: _string_list(entities_in.get(k)) for k in
+                ("symptoms", "medications", "allergies", "diagnoses", "follow_up")}
 
-    # Medications the patient reported (history) — kept distinct from the Rx.
-    for item in (ent.get("medications") or []):
-        add("medication", item if isinstance(item, str) else (item.get("value") or item.get("name") or ""),
-            {"context": "reported"} if isinstance(item, str) else {"context": "reported", **item})
+    considerations = normalise_considerations(data.get("clinical_considerations"))
+    considerations["red_flags"] = _trim_flags(considerations["red_flags"])
 
-    # Medications the doctor prescribed this visit.
-    for rx in (prescription or []):
-        if isinstance(rx, dict):
-            name = rx.get("drug") or rx.get("name") or rx.get("brand") or rx.get("generic") or ""
-            add("medication", name, {"context": "prescribed", **rx})
-        else:
-            add("medication", rx, {"context": "prescribed"})
+    follow_ups = [] if body.mode == "final" else _dedupe_followups(
+        [
+            {
+                "question": str(q.get("question", "")).strip(),
+                "concern": str(q.get("concern", "")).strip(),
+                "likelihood_pct": _pct(q.get("likelihood_pct")),
+                "severity": str(q.get("severity", "low")).lower(),
+            }
+            for q in (data.get("follow_up_questions") or [])
+            if isinstance(q, dict) and q.get("question")
+        ],
+        considerations["red_flags"],
+    )
 
-    for metric, reading in (vitals or {}).items():
-        if str(reading).strip():
-            add("vital", f"{metric}: {reading}", {"metric": metric, "reading": str(reading)})
-
-    return rows
-
-
-async def _write_facts(h, clinic_id, patient_id, visit_id, actor_id, now, *,
-                       entities, prescription, vitals):
-    """Persist the doctor-approved encounter into clinical_facts. Re-finalising a
-    visit supersedes its prior facts (append-only — we never delete), then writes
-    the current confirmed set."""
-    await rest("PATCH", "clinical_facts", headers=h,
-               params={"visit_id": f"eq.{visit_id}", "status": "eq.confirmed"},
-               json={"status": "superseded"})
-    rows = _fact_rows(clinic_id, patient_id, visit_id, actor_id, now,
-                      entities=entities, prescription=prescription, vitals=vitals)
-    if rows:
-        await rest("POST", "clinical_facts", headers=h, json=rows)
+    note = {
+        "dialogue": [d for d in (data.get("dialogue") or []) if isinstance(d, dict) and d.get("text")],
+        "soap": {k: str(so.get(k, "") or "") for k in ("subjective", "objective", "assessment", "plan")},
+        "entities": entities,
+        "follow_up_questions": follow_ups,
+        "clinical_considerations": considerations,
+        "provider": result.provider,
+    }
+    # Completeness is computed here, not asked of the model: it must be
+    # reproducible and explainable, and the model's own estimate was neither.
+    note["completeness"] = completeness.score({**note["soap"], "entities": entities})
+    note["clinical_considerations"]["missing_information"] = completeness.missing_information(
+        {**note["soap"], "entities": entities}
+    )
+    return note
 
 
 # --------------------------------------------------------------------- #
-# Save the reviewed visit to a patient (existing or new)
+# Escalation-risk prompt (documentation prompt, physician-review-only)
+# --------------------------------------------------------------------- #
+class RiskRequest(BaseModel):
+    age: float | None = None
+    vitals: dict[str, str] | None = None
+    complaints: list[dict] | None = None
+    hpi: str = ""
+    past_history: str = ""
+    medications: str = ""
+
+
+@router.post("/risk")
+async def assess_risk(body: RiskRequest, user: CurrentUser = Depends(get_current_user)):
+    """Score the encounter recorded so far. No network calls, no cost, no AI
+    provider — pure local inference, so it works when everything else is down."""
+    payload = body.model_dump()
+    payload["completeness_pct"] = completeness.score(payload)["score_pct"]
+    result = risk.assess(payload)
+    registry.inc("cma_risk_assessments_total",
+                 {"escalate": str(result.get("escalate", False)).lower()})
+    return result
+
+
+# --------------------------------------------------------------------- #
+# Save — one atomic database transaction
 # --------------------------------------------------------------------- #
 class NewPatient(BaseModel):
-    name: str
-    age: int | None = None
+    name: str = Field(min_length=1, max_length=200)
+    age: int | None = Field(default=None, ge=0, le=130)
     gender: str | None = None
     phone: str | None = None
     height_cm: float | None = None
@@ -752,9 +343,10 @@ class NewPatient(BaseModel):
 class SaveRequest(BaseModel):
     patient_id: str | None = None
     new_patient: NewPatient | None = None
-    visit_id: str | None = None               # set when finalising/updating a draft
-    status: str = "completed"                 # "completed" | "in_progress" (draft)
-    transcript: str | None = None
+    visit_id: str | None = None
+    expected_version: int | None = None       # optimistic lock, from GET /visits/{id}
+    status: str = "completed"                 # "completed" | "in_progress"
+    transcript: str | None = Field(default=None, max_length=400_000)
     dialogue: list | None = None
     soap: dict | None = None
     entities: dict | None = None
@@ -762,102 +354,274 @@ class SaveRequest(BaseModel):
     prescription: list | None = None
     clinical_considerations: dict | None = None
     vitals: dict | None = None
-    wizard: dict | None = None                # structured wizard state, for resuming drafts
-    sign_off: dict | None = None              # completeness-gate warnings + overrides (with reasons)
-    # Consent + physician attestation (P0 safety layer).
+    wizard: dict | None = None
+    sign_off: dict | None = None
     consent_given: bool = False
-    consent_method: str | None = None       # 'verbal' | 'written'
-    attested: bool = False                    # physician's "I reviewed & approve"
+    consent_method: str | None = None
+    attested: bool = False
+
+
+_ENTITY_FACT_TYPES = {"diagnoses": "diagnosis", "allergies": "allergy", "symptoms": "symptom"}
+
+
+def build_facts(*, entities: dict | None, prescription: list | None, vitals: dict | None) -> list[dict]:
+    """Turn the signed encounter into clinical-fact rows.
+
+    Two distinctions the previous version blurred and that matter downstream:
+
+    * A medication the patient *reported* is history; a medication the doctor
+      *prescribed* is the current regimen. They are tagged differently so the
+      medication timeline does not report stopping a drug that was never started.
+    * An allergy statement of "no known drug allergies" is not an allergy. It is
+      recorded as a documented-negative rather than as an allergen, so nothing
+      downstream tries to match a prescription against it.
+    """
+    rows: list[dict] = []
+
+    def add(fact_type: str, value: object, structured: dict | None = None,
+            clinical_status: str = "current") -> None:
+        text = str(value or "").strip()
+        if text:
+            rows.append({"fact_type": fact_type, "value": text[:500],
+                         "structured": structured or {}, "clinical_status": clinical_status,
+                         "source": "doctor_confirmed_ai"})
+
+    ent = entities or {}
+    for key, fact_type in _ENTITY_FACT_TYPES.items():
+        for item in (ent.get(key) or []):
+            value = item if not isinstance(item, dict) else (
+                item.get("value") or item.get("name") or item.get("text") or ""
+            )
+            if fact_type == "allergy":
+                parsed = completeness.normalise_allergy_statement(str(value))
+                if parsed["none_known"]:
+                    add("allergy", "No known drug allergies",
+                        {"documented_negative": True}, clinical_status="current")
+                    continue
+                for allergen in parsed["allergens"] or ([str(value)] if value else []):
+                    add("allergy", allergen, item if isinstance(item, dict) else {})
+                continue
+            add(fact_type, value, item if isinstance(item, dict) else {})
+
+    for item in (ent.get("medications") or []):
+        value = item if not isinstance(item, dict) else (item.get("value") or item.get("name") or "")
+        structured = {"context": "reported"}
+        if isinstance(item, dict):
+            structured.update(item)
+            structured["context"] = "reported"
+        add("medication", value, structured, clinical_status="current")
+
+    for rx in (prescription or []):
+        if isinstance(rx, dict):
+            name = rx.get("generic") or rx.get("drug") or rx.get("name") or rx.get("brand") or ""
+            add("medication", name, {**rx, "context": "prescribed"})
+        else:
+            add("medication", rx, {"context": "prescribed"})
+
+    for metric, reading in (vitals or {}).items():
+        if str(reading).strip():
+            add("vital", f"{metric}: {reading}",
+                {"metric": str(metric), "reading": str(reading)})
+
+    return rows
 
 
 @router.post("/save")
 async def save(body: SaveRequest, user: CurrentUser = Depends(get_current_user)):
-    h = user_headers(user.token)
+    headers = user_headers(user.token)
     is_draft = body.status == "in_progress"
 
-    # A completed note is a permanent clinical record — attestation is required.
-    # A draft (in_progress) is a work-in-progress and does not require attestation.
-    if not is_draft and not body.attested:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            "Physician attestation is required before completing a note.")
+    # Checked here so the caller gets a clear 400 rather than a database error,
+    # and again inside finalize_visit() so it cannot be bypassed.
+    if not is_draft:
+        if not body.attested:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Physician attestation is required before completing a note.")
+        if not user.can_attest:
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                f"Role '{user.role}' may not sign a clinical note.")
 
-    now = datetime.now(timezone.utc).isoformat()
-    visit_status = "in_progress" if is_draft else "approved"
+    patient_id = await _resolve_patient(body, user, headers)
 
-    # 1. Resolve or create the patient.
-    if body.patient_id:
-        patient_id = body.patient_id
-    elif body.new_patient:
-        np = body.new_patient
-        dob = f"{date.today().year - np.age:04d}-01-01" if np.age else None
-        payload = {
-            "clinic_id": user.clinic_id, "name": np.name, "gender": np.gender,
-            "phone": np.phone, "dob": dob, "height_cm": np.height_cm, "weight_kg": np.weight_kg,
-        }
-        r = await rest("POST", "patients", headers=h, json=payload, prefer="return=representation")
-        if r.status_code not in (200, 201):
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Patient create failed: {r.text[:300]}")
-        patient_id = r.json()[0]["id"]
-    else:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide patient_id or new_patient")
-
-    # The note payload (shared by create + update).
     so = body.soap or {}
     note = {
-        "transcript": body.transcript, "dialogue": body.dialogue or [],
+        "transcript": body.transcript,
+        "dialogue": body.dialogue or [],
         "subjective": so.get("subjective"), "objective": so.get("objective"),
         "assessment": so.get("assessment"), "plan": so.get("plan"),
-        "entities": body.entities or {}, "follow_up_questions": body.follow_up_questions or [],
+        "entities": body.entities or {},
+        "follow_up_questions": body.follow_up_questions or [],
         "prescription": body.prescription or [],
         "clinical_considerations": body.clinical_considerations or {},
         "vitals": body.vitals or {},
         "wizard": body.wizard or {},
         "sign_off": body.sign_off or {},
     }
-    attest = ({"attested": True, "attested_at": now, "attested_by": user.user_id}
-              if not is_draft else {"attested": False})
-    consent = ({"consent_given": True, "consent_at": now, "consent_method": body.consent_method}
-               if body.consent_given else {})
+    facts = [] if is_draft else build_facts(
+        entities=body.entities, prescription=body.prescription, vitals=body.vitals,
+    )
 
-    # 2. Update an existing draft, or create a new visit + note.
-    if body.visit_id:
-        vp = {"status": visit_status, "approved_at": (None if is_draft else now), **consent}
-        v = await rest("PATCH", "visits", headers=h, prefer="return=representation",
-                       params={"id": f"eq.{body.visit_id}"}, json=vp)
-        if v.status_code not in (200, 204) or (v.status_code == 200 and not v.json()):
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Visit update failed: {v.text[:300]}")
-        visit_id = body.visit_id
-        n = await rest("PATCH", "soap_notes", headers=h, params={"visit_id": f"eq.{visit_id}"},
-                       json={**note, **attest})
-        if n.status_code not in (200, 204):
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Note update failed: {n.text[:300]}")
-        action = "complete_visit" if not is_draft else "update_draft"
-    else:
-        v = await rest("POST", "visits", headers=h, prefer="return=representation", json={
-            "patient_id": patient_id, "clinic_id": user.clinic_id, "doctor_id": user.user_id,
-            "status": visit_status, "approved_at": (None if is_draft else now), **consent,
+    resp = await rpc("finalize_visit", headers=headers, args={
+        "p_patient_id": patient_id,
+        "p_note": note,
+        "p_facts": facts,
+        "p_visit_id": body.visit_id,
+        "p_expected_version": body.expected_version,
+        "p_draft": is_draft,
+        "p_attested": body.attested,
+        "p_consent_given": body.consent_given,
+        "p_consent_method": body.consent_method,
+    })
+
+    if resp.status_code not in (200, 201):
+        raise _translate_db_error(resp)
+
+    result = resp.json()
+    registry.inc("cma_visits_saved_total", {"status": result.get("status", "?")})
+    return result
+
+
+async def _resolve_patient(body: SaveRequest, user: CurrentUser, headers: dict) -> str:
+    if body.patient_id:
+        return body.patient_id
+    if not body.new_patient:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide patient_id or new_patient")
+
+    from datetime import date
+
+    from ...core.supabase import rest
+
+    np = body.new_patient
+    dob = f"{date.today().year - np.age:04d}-01-01" if np.age else None
+    r = await rest("POST", "patients", headers=headers, prefer="return=representation", json={
+        "clinic_id": user.clinic_id, "name": np.name, "gender": np.gender,
+        "phone": np.phone, "dob": dob, "height_cm": np.height_cm, "weight_kg": np.weight_kg,
+    })
+    if r.status_code not in (200, 201):
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Patient create failed: {r.text[:300]}")
+    return r.json()[0]["id"]
+
+
+# PostgreSQL SQLSTATEs raised by finalize_visit(), mapped to the HTTP status a
+# client can act on. Without this every rule violation surfaces as an opaque
+# 502 and the UI cannot tell "someone else edited this" from "the database is
+# down".
+_SQLSTATE_STATUS = {
+    "P0001": status.HTTP_400_BAD_REQUEST,          # raise_exception default
+    "23514": status.HTTP_409_CONFLICT,             # check_violation
+    "42501": status.HTTP_403_FORBIDDEN,            # insufficient_privilege
+    "02000": status.HTTP_404_NOT_FOUND,            # no_data_found
+    "40001": status.HTTP_409_CONFLICT,             # serialization_failure
+}
+
+
+def _translate_db_error(resp) -> HTTPException:
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    code = str(body.get("code") or "")
+    message = str(body.get("message") or body.get("hint") or resp.text[:300])
+    http_status = _SQLSTATE_STATUS.get(code, status.HTTP_502_BAD_GATEWAY)
+    log.warning("save_rejected", extra={"extra_fields": {"sqlstate": code, "status": http_status}})
+    if http_status == status.HTTP_502_BAD_GATEWAY:
+        message = "Could not save the visit. Nothing was written; please retry."
+    return HTTPException(http_status, message)
+
+
+# --------------------------------------------------------------------- #
+# Normalisation helpers
+# --------------------------------------------------------------------- #
+def _cap(text: str) -> str:
+    limit = get_settings().max_transcript_chars
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    # Keep the tail: the end of a consultation carries the plan and the
+    # prescription, which are the parts a truncated note must not lose.
+    return text[-limit:]
+
+
+def _pct(value: object) -> int:
+    try:
+        return max(0, min(100, int(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _string_list(value: object) -> list[str]:
+    """Coerce a model-supplied list into clean strings.
+
+    `str(None)` is `"None"`, which is truthy — so a JSON `null` in a symptom
+    array used to reach the physician as the literal word "None" in their note.
+    Non-strings are dropped rather than stringified.
+    """
+    if not isinstance(value, list):
+        return []
+    return [x.strip() for x in value if isinstance(x, str) and x.strip()]
+
+
+def normalise_considerations(raw: object) -> dict:
+    """Coerce the physician-review-only block into a fixed shape.
+
+    Defensive by design: this is model output, and the UI must not have to
+    handle a red flag that is a string, a null urgency, or a missing field.
+    """
+    c = raw if isinstance(raw, dict) else {}
+    red_flags = []
+    for f in (c.get("red_flags") or []):
+        if not isinstance(f, dict) or not f.get("finding"):
+            continue
+        urgency = str(f.get("urgency", "routine")).lower()
+        red_flags.append({
+            "finding": str(f.get("finding", "")).strip(),
+            "concern": str(f.get("concern", "")).strip(),
+            "urgency": urgency if urgency in _URGENCY else "routine",
+            "action": str(f.get("action", "")).strip(),
+            "source": "ai",
         })
-        if v.status_code not in (200, 201):
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Visit create failed: {v.text[:300]}")
-        visit_id = v.json()[0]["id"]
-        n = await rest("POST", "soap_notes", headers=h, prefer="return=representation", json={
-            "visit_id": visit_id, "patient_id": patient_id, "clinic_id": user.clinic_id,
-            "created_by": user.user_id, **note, **attest,
-        })
-        if n.status_code not in (200, 201):
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Note save failed: {n.text[:300]}")
-        action = "save_draft" if is_draft else "save_visit"
+    red_flags.sort(key=lambda x: _URG_RANK.get(x["urgency"], 3))
 
-    # A completed, attested note becomes durable patient memory: fan the
-    # doctor-approved encounter out into the append-only clinical_facts store.
-    if not is_draft:
-        await _write_facts(h, user.clinic_id, patient_id, visit_id, user.user_id, now,
-                           entities=body.entities, prescription=body.prescription, vitals=body.vitals)
+    investigations = [
+        {"test": str(i.get("test", "")).strip(), "rationale": str(i.get("rationale", "")).strip()}
+        for i in (c.get("suggested_investigations") or [])
+        if isinstance(i, dict) and i.get("test")
+    ]
+    return {
+        "red_flags": red_flags,
+        "suggested_investigations": investigations,
+        "missing_information": _string_list(c.get("missing_information")),
+    }
 
-    after = {"patient_id": patient_id, "status": visit_status}
-    overrides = (body.sign_off or {}).get("overrides") if not is_draft else None
-    if overrides:
-        after["overrides"] = overrides       # ignored safety warnings are permanently on record
-    await audit(clinic_id=user.clinic_id, actor_id=user.user_id, action=action,
-                entity="visit", entity_id=visit_id, after=after)
-    return {"visit_id": visit_id, "patient_id": patient_id, "status": visit_status}
+
+def _trim_flags(flags: list[dict], keep: int = 4, action_max: int = 200) -> list[dict]:
+    """Cap the red-flag panel so it stays scannable. Four is the point at which
+    a physician reads the list; beyond it they skim past the whole panel."""
+    out = []
+    for f in flags[:keep]:
+        f["action"] = (f.get("action") or "")[:action_max]
+        f["concern"] = (f.get("concern") or "")[:160]
+        out.append(f)
+    return out
+
+
+_STOP = {"about", "ask", "for", "the", "and", "any", "check", "assess", "with", "your",
+         "patient", "possible", "consider", "rule", "out", "screen", "signs", "symptoms",
+         "history", "this", "that", "from", "have", "been", "such", "other"}
+
+
+def _keywords(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z]+", (text or "").lower()) if len(w) > 3 and w not in _STOP}
+
+
+def _dedupe_followups(follow_ups: list[dict], red_flags: list[dict]) -> list[dict]:
+    """Drop follow-ups that merely restate a red flag, then sort by severity."""
+    flag_keywords = [(_keywords(rf["finding"]) | _keywords(rf["action"])) for rf in red_flags]
+    kept = [
+        q for q in follow_ups
+        if not any(len((_keywords(q.get("question", "")) | _keywords(q.get("concern", ""))) & k) >= 2
+                   for k in flag_keywords)
+    ]
+    kept.sort(key=lambda q: (_SEV_RANK.get(str(q.get("severity", "low")).lower(), 3),
+                             -int(q.get("likelihood_pct") or 0)))
+    return kept

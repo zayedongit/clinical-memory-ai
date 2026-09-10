@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends
 
-from ..deps import CurrentUser, get_current_user
+from ...core import pgrst
 from ...core.supabase import rest, user_headers
 from ...schemas import MeResponse
+from ..deps import CurrentUser, get_current_user
 
 router = APIRouter()
 
@@ -14,7 +15,7 @@ async def me(user: CurrentUser = Depends(get_current_user)) -> MeResponse:
         "GET",
         "clinics",
         headers=user_headers(user.token),
-        params={"id": f"eq.{user.clinic_id}", "select": "name", "limit": "1"},
+        params={"id": pgrst.eq(user.clinic_id), "select": "name", "limit": "1"},
     )
     rows = resp.json() if resp.status_code == 200 else []
     clinic_name = rows[0]["name"] if rows else None

@@ -11,6 +11,13 @@
 --   rank conditions by how many distinct findings they explain.
 -- =====================================================================
 
+-- Superseded by a later migration that changes this function's return type.
+-- `create or replace function` cannot change a return type, so re-applying the
+-- whole migration sequence (which `supabase db push` does against a partially
+-- applied project) failed here. Dropping first makes the file re-runnable; the
+-- final state is still whatever the last migration defines.
+drop function if exists public.kb_ground_red_flags(text[], real, integer);
+
 create or replace function public.kb_ground_red_flags(
   findings      text[],
   sim_threshold real default 0.45,

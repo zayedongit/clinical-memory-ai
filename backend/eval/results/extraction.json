@@ -1,0 +1,268 @@
+{
+  "generated_at": "2026-09-10T20:34:50+00:00",
+  "mode": "recorded (deterministic)",
+  "data_provenance": "synthetic \u2014 written by hand for evaluation, not captured from any consultation",
+  "n_cases": 6,
+  "citation_verification": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "specificity": 1.0,
+    "confusion_matrix": {
+      "tp": 13,
+      "fp": 0,
+      "tn": 13,
+      "fn": 0
+    },
+    "note": "precision = of the quotes we showed the physician, how many were real. recall = of the real quotes, how many we kept. A verifier that drops everything scores perfect precision and is useless, so both are gated.",
+    "failures": []
+  },
+  "extraction": {
+    "symptoms": {
+      "precision": 0.9286,
+      "recall": 0.9286,
+      "f1": 0.9286,
+      "tp": 13,
+      "predicted": 14,
+      "gold": 14
+    },
+    "medications": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 3,
+      "predicted": 3,
+      "gold": 3
+    },
+    "vitals": {
+      "precision": 0.7143,
+      "recall": 1.0,
+      "f1": 0.8333,
+      "tp": 5,
+      "predicted": 7,
+      "gold": 5
+    },
+    "allergies_accuracy": 1.0,
+    "cases": [
+      {
+        "id": "acs-hinglish",
+        "symptoms": {
+          "precision": 0.75,
+          "recall": 1.0,
+          "f1": 0.8571,
+          "tp": 3,
+          "predicted": 4,
+          "gold": 3,
+          "missed": []
+        },
+        "medications": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 1,
+          "predicted": 1,
+          "gold": 1,
+          "missed": []
+        },
+        "vitals": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 2,
+          "predicted": 2,
+          "gold": 2,
+          "missed": []
+        },
+        "allergy_expected": "none_known",
+        "allergy_actual": "none_known",
+        "evidence_coverage_pct": 100,
+        "completeness_pct": 65,
+        "completeness_grade": "incomplete"
+      },
+      {
+        "id": "urti-benign",
+        "symptoms": {
+          "precision": 1.0,
+          "recall": 0.6667,
+          "f1": 0.8,
+          "tp": 2,
+          "predicted": 2,
+          "gold": 3,
+          "missed": [
+            "cold"
+          ]
+        },
+        "medications": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 0,
+          "predicted": 0,
+          "gold": 0,
+          "missed": []
+        },
+        "vitals": {
+          "precision": 0.0,
+          "recall": 1.0,
+          "f1": 0.0,
+          "tp": 0,
+          "predicted": 2,
+          "gold": 0,
+          "missed": []
+        },
+        "allergy_expected": "none_known",
+        "allergy_actual": "none_known",
+        "evidence_coverage_pct": 67,
+        "completeness_pct": 50,
+        "completeness_grade": "incomplete"
+      },
+      {
+        "id": "penicillin-allergy",
+        "symptoms": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 3,
+          "predicted": 3,
+          "gold": 3,
+          "missed": []
+        },
+        "medications": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 1,
+          "predicted": 1,
+          "gold": 1,
+          "missed": []
+        },
+        "vitals": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 0,
+          "predicted": 0,
+          "gold": 0,
+          "missed": []
+        },
+        "allergy_expected": "allergens",
+        "allergy_actual": "allergens",
+        "evidence_coverage_pct": 100,
+        "completeness_pct": 48,
+        "completeness_grade": "incomplete"
+      },
+      {
+        "id": "chronic-htn-review",
+        "symptoms": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 1,
+          "predicted": 1,
+          "gold": 1,
+          "missed": []
+        },
+        "medications": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 1,
+          "predicted": 1,
+          "gold": 1,
+          "missed": []
+        },
+        "vitals": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 3,
+          "predicted": 3,
+          "gold": 3,
+          "missed": []
+        },
+        "allergy_expected": "none_known",
+        "allergy_actual": "none_known",
+        "evidence_coverage_pct": 100,
+        "completeness_pct": 59,
+        "completeness_grade": "incomplete"
+      },
+      {
+        "id": "gastro-dehydration",
+        "symptoms": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 3,
+          "predicted": 3,
+          "gold": 3,
+          "missed": []
+        },
+        "medications": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 0,
+          "predicted": 0,
+          "gold": 0,
+          "missed": []
+        },
+        "vitals": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 0,
+          "predicted": 0,
+          "gold": 0,
+          "missed": []
+        },
+        "allergy_expected": "none_known",
+        "allergy_actual": "none_known",
+        "evidence_coverage_pct": 100,
+        "completeness_pct": 41,
+        "completeness_grade": "incomplete"
+      },
+      {
+        "id": "empty-consultation",
+        "symptoms": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 1,
+          "predicted": 1,
+          "gold": 1,
+          "missed": []
+        },
+        "medications": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 0,
+          "predicted": 0,
+          "gold": 0,
+          "missed": []
+        },
+        "vitals": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 0,
+          "predicted": 0,
+          "gold": 0,
+          "missed": []
+        },
+        "allergy_expected": "not_recorded",
+        "allergy_actual": "not_recorded",
+        "evidence_coverage_pct": 0,
+        "completeness_pct": 14,
+        "completeness_grade": "incomplete"
+      }
+    ]
+  },
+  "gates": {
+    "citation_precision": 1.0,
+    "citation_recall": 0.85,
+    "symptoms_f1": 0.8,
+    "medications_f1": 0.8,
+    "allergies_accuracy": 1.0
+  }
+}

@@ -1,0 +1,170 @@
+{
+  "generated_at": "2026-09-10T20:34:50+00:00",
+  "data_provenance": "synthetic \u2014 classic presentations written for evaluation",
+  "evaluates": "app/clinical/risk.py \u2014 deterministic criteria plus the calibrated model",
+  "sensitivity": 1.0,
+  "missed": [],
+  "false_alarm_rate": 0.0833,
+  "n_red_flag_cases": 12,
+  "n_benign_cases": 12,
+  "gates": {
+    "sensitivity": 0.9,
+    "false_alarm_rate": 0.2
+  },
+  "red_flag_cases": [
+    {
+      "name": "Cardiac chest pain",
+      "escalated": true,
+      "probability": 0.9389,
+      "hard_criteria": [
+        "Chest pain with breathlessness"
+      ]
+    },
+    {
+      "name": "Meningitis",
+      "escalated": true,
+      "probability": 0.7143,
+      "hard_criteria": [
+        "Severe headache with neck stiffness",
+        "Fever with neck stiffness"
+      ]
+    },
+    {
+      "name": "Subarachnoid haemorrhage",
+      "escalated": true,
+      "probability": 0.875,
+      "hard_criteria": []
+    },
+    {
+      "name": "Pulmonary embolism / DVT",
+      "escalated": true,
+      "probability": 0.9389,
+      "hard_criteria": [
+        "Chest pain with breathlessness"
+      ]
+    },
+    {
+      "name": "Appendicitis / acute abdomen",
+      "escalated": true,
+      "probability": 0.4242,
+      "hard_criteria": [
+        "Abdominal pain with fever \u2014 consider an acute abdomen",
+        "Abdominal pain, vomiting and fever together"
+      ]
+    },
+    {
+      "name": "Upper GI bleed",
+      "escalated": true,
+      "probability": 0.9389,
+      "hard_criteria": []
+    },
+    {
+      "name": "Stroke",
+      "escalated": true,
+      "probability": 0.9389,
+      "hard_criteria": [
+        "Focal neurological deficit"
+      ]
+    },
+    {
+      "name": "Ectopic pregnancy",
+      "escalated": true,
+      "probability": 0.9389,
+      "hard_criteria": []
+    },
+    {
+      "name": "Diabetic ketoacidosis",
+      "escalated": true,
+      "probability": 0.9389,
+      "hard_criteria": [
+        "Vomiting with rapid breathing \u2014 consider metabolic acidosis",
+        "Thirst and polyuria with vomiting \u2014 consider DKA"
+      ]
+    },
+    {
+      "name": "Sepsis / severe infection",
+      "escalated": true,
+      "probability": 0.875,
+      "hard_criteria": [
+        "Altered mental state"
+      ]
+    },
+    {
+      "name": "Asthma exacerbation",
+      "escalated": true,
+      "probability": 0.4242,
+      "hard_criteria": []
+    },
+    {
+      "name": "Tuberculosis (chronic red flag)",
+      "escalated": true,
+      "probability": 0.875,
+      "hard_criteria": [
+        "Weight loss with night sweats \u2014 consider tuberculosis or malignancy",
+        "Blood in the sputum"
+      ]
+    }
+  ],
+  "benign_cases": [
+    {
+      "name": "Common cold",
+      "escalated": false,
+      "probability": 0.0431
+    },
+    {
+      "name": "Tension headache",
+      "escalated": false,
+      "probability": 0.0431
+    },
+    {
+      "name": "Minor ankle sprain",
+      "escalated": false,
+      "probability": 0.0431
+    },
+    {
+      "name": "Dyspepsia (near-miss: abdominal pain, no fever)",
+      "escalated": false,
+      "probability": 0.0431
+    },
+    {
+      "name": "Viral gastroenteritis (near-miss: vomiting, no rapid breathing)",
+      "escalated": false,
+      "probability": 0.1053
+    },
+    {
+      "name": "Smoker's cough (near-miss: chronic cough, no weight loss)",
+      "escalated": true,
+      "probability": 0.4242
+    },
+    {
+      "name": "Allergic rhinitis",
+      "escalated": false,
+      "probability": 0.0431
+    },
+    {
+      "name": "Mechanical low back pain",
+      "escalated": false,
+      "probability": 0.0431
+    },
+    {
+      "name": "Routine diabetes review",
+      "escalated": false,
+      "probability": 0.0431
+    },
+    {
+      "name": "Mild fever, no localising signs (near-miss: fever, no abdominal pain)",
+      "escalated": false,
+      "probability": 0.0431
+    },
+    {
+      "name": "Contact dermatitis",
+      "escalated": false,
+      "probability": 0.0431
+    },
+    {
+      "name": "Uncomplicated UTI",
+      "escalated": false,
+      "probability": 0.0431
+    }
+  ]
+}

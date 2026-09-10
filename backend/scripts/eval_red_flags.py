@@ -1,116 +1,152 @@
 #!/usr/bin/env python3
-"""Red-flag grounding eval.
+"""Red-flag evaluation for the escalation path that actually ships.
 
-Scores whether the curated KB grounding (kb_ground_red_flags) surfaces the
-expected can't-miss condition for a set of classic red-flag presentations.
-Runs directly against Postgres — no LLM, no API key — so it's cheap and CI-safe.
+    uv run python scripts/eval_red_flags.py
+    uv run python scripts/eval_red_flags.py --gate
 
-Usage:
-  export DATABASE_URL='postgresql://postgres.<ref>:<pw>@<host>:5432/postgres'
-  cd backend && uv run python scripts/eval_red_flags.py
-  # options: --cases path/to.json  --sim 0.45  --verbose
+**What changed and why.** The previous version of this script evaluated
+`kb_ground_red_flags()`, a knowledge-base fuzzy matcher that had already been
+removed from the request path — it surfaced conditions unrelated to the
+presentation (liver cancer for an ankle sprain), so the scribe stopped calling
+it. The evaluation kept running and kept reporting a recall number for code no
+patient's consultation ever touched, which is worse than having no evaluation:
+it produced a metric that looked like evidence.
 
-Exit code is non-zero if recall falls below --min-recall (default 0.0, i.e.
-report-only) so it can gate CI once you're happy with coverage.
+It also required a live `DATABASE_URL`, so it could not run in CI, which is how
+the drift went unnoticed.
+
+This version evaluates the path in production today:
+
+  1. the deterministic hard criteria in `app/clinical/risk.py`, and
+  2. the calibrated escalation-risk model.
+
+It needs no database, no API key and no network, so it runs on every push.
+
+Two numbers, and both matter:
+
+* **Sensitivity** on the red-flag cases — a missed emergency is the failure
+  that hurts a patient.
+* **False-alarm rate** on the benign controls — a system that flags a common
+  cold teaches clinicians to dismiss the panel, which converts into missed
+  emergencies at one remove. Alarm fatigue is a patient-safety problem, not a
+  UX complaint, so it is gated too.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
-import psycopg2
+BACKEND = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BACKEND))
 
-DEFAULT_CASES = Path(__file__).resolve().parent.parent / "eval" / "red_flag_cases.json"
+from app.clinical import risk  # noqa: E402
 
+DEFAULT_CASES = BACKEND / "eval" / "red_flag_cases.json"
+RESULTS = BACKEND / "eval" / "results" / "red_flags.json"
 
-def ground(cur, findings: list[str], sim: float) -> list[dict]:
-    cur.execute(
-        "select condition_id, condition_name, acuity, any_cantmiss, matched_count, "
-        "redflag_label, action from kb_ground_red_flags(%s::text[], %s::real, 6)",
-        (findings, sim),
-    )
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+GATES = {"sensitivity": 0.90, "false_alarm_rate": 0.20}
 
 
-def case_hit(rows: list[dict], expect_any: list[str]) -> tuple[bool, str]:
-    hay = " || ".join(
-        f"{(r.get('condition_name') or '')} {(r.get('redflag_label') or '')}".lower()
-        for r in rows
-    )
-    for term in expect_any:
-        if term.lower() in hay:
-            return True, term
-    return False, ""
+def assess(case: dict) -> dict:
+    payload = {
+        "age": case.get("age", 45),
+        "vitals": case.get("vitals", {}),
+        "complaints": [{"text": s} for s in case.get("symptoms", [])],
+        "hpi": case.get("hpi", " ".join(case.get("symptoms", []))),
+        "past_history": case.get("past_history", ""),
+        "medications": case.get("medications", ""),
+    }
+    return risk.assess(payload)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", default=str(DEFAULT_CASES))
-    ap.add_argument("--sim", type=float, default=0.45)
-    ap.add_argument("--min-recall", type=float, default=0.0)
+    ap.add_argument("--out", default=str(RESULTS))
+    ap.add_argument("--gate", action="store_true")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
-    dsn = os.getenv("DATABASE_URL")
-    if not dsn:
-        print("ERROR: set DATABASE_URL (session-pooler URI).", file=sys.stderr)
-        return 2
-
     data = json.loads(Path(args.cases).read_text())
-    cases = data.get("cases", [])
-    if not cases:
+    positives = data.get("cases", [])
+    negatives = data.get("negative_cases", [])
+    if not positives:
         print("No cases found.", file=sys.stderr)
         return 2
 
-    conn = psycopg2.connect(dsn)
-    conn.set_session(readonly=True, autocommit=True)
-    cur = conn.cursor()
+    print(f"\nRed-flag escalation eval — {len(positives)} red-flag, "
+          f"{len(negatives)} benign (synthetic)")
+    print("=" * 78)
 
-    passed = 0
-    print(f"\nRed-flag grounding eval — {len(cases)} cases (sim>={args.sim})\n" + "-" * 64)
-    for c in cases:
-        rows = ground(cur, c["symptoms"], args.sim)
-        hit, term = case_hit(rows, c["expect_any"])
-        passed += hit
-        mark = "PASS" if hit else "MISS"
-        conds = ", ".join(sorted({r["condition_name"] for r in rows})[:4]) or "(no can't-miss match)"
-        print(f"[{mark}] {c['name']:32s} via '{term}'" if hit else f"[{mark}] {c['name']:32s} -> {conds}")
-        if args.verbose and rows:
-            for r in rows[:6]:
-                print(f"         · {r['condition_name']}  ⟶  {r.get('redflag_label')}")
+    caught, missed = 0, []
+    positive_rows = []
+    for case in positives:
+        result = assess(case)
+        hit = bool(result.get("escalate"))
+        caught += hit
+        why = ", ".join(result.get("hard_criteria_met", [])) or (
+            f"model p={result.get('probability')}" if result.get("model_flagged") else "")
+        positive_rows.append({"name": case["name"], "escalated": hit,
+                              "probability": result.get("probability"),
+                              "hard_criteria": result.get("hard_criteria_met", [])})
+        if hit:
+            print(f"  [CATCH] {case['name']:34s} {why[:60]}")
+        else:
+            missed.append(case["name"])
+            print(f"  [MISS ] {case['name']:34s} p={result.get('probability')}")
 
-    recall = passed / len(cases)
-    print("-" * 64)
-    print(f"Recall: {passed}/{len(cases)} = {recall:.0%}\n")
+    sensitivity = caught / len(positives)
+    print("-" * 78)
+    print(f"Sensitivity: {caught}/{len(positives)} = {sensitivity:.0%}\n")
 
-    # Precision guard: benign presentations should NOT raise a LOUD (can't-miss)
-    # red flag for a serious condition. Routine grey notes are acceptable.
-    negatives = data.get("negative_cases", [])
+    false_alarms, negative_rows = 0, []
     if negatives:
-        clean = 0
-        print(f"Precision / alarm-fatigue — {len(negatives)} benign cases\n" + "-" * 64)
-        for c in negatives:
-            rows = ground(cur, c["symptoms"], args.sim)
-            loud = [r for r in rows if r.get("any_cantmiss")]
-            bad = sorted({r["condition_name"] for r in loud
-                          if any(t.lower() in (r["condition_name"] or "").lower() for t in c["forbid_any"])})
-            ok = not bad
-            clean += ok
-            if ok:
-                extra = f" ({len(loud)} quiet can't-miss note(s))" if loud else ""
-                print(f"[OK  ] {c['name']:28s} no false alarm{extra}")
-            else:
-                print(f"[FALSE] {c['name']:28s} loud flag(s): {', '.join(bad)}")
-        print("-" * 64)
-        print(f"No-false-alarm: {clean}/{len(negatives)} = {clean/len(negatives):.0%}\n")
+        print(f"Benign controls — alarm fatigue check ({len(negatives)} cases)")
+        print("-" * 78)
+        for case in negatives:
+            result = assess(case)
+            flagged = bool(result.get("escalate"))
+            false_alarms += flagged
+            negative_rows.append({"name": case["name"], "escalated": flagged,
+                                  "probability": result.get("probability")})
+            mark = "FALSE" if flagged else "OK   "
+            detail = ", ".join(result.get("hard_criteria_met", [])) if flagged else ""
+            print(f"  [{mark}] {case['name']:34s} p={result.get('probability')} {detail[:40]}")
+        false_alarm_rate = false_alarms / len(negatives)
+        print("-" * 78)
+        print(f"False-alarm rate: {false_alarms}/{len(negatives)} = {false_alarm_rate:.0%}\n")
+    else:
+        false_alarm_rate = 0.0
 
-    cur.close()
-    conn.close()
-    return 0 if recall >= args.min_recall else 1
+    report = {
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "data_provenance": "synthetic — classic presentations written for evaluation",
+        "evaluates": "app/clinical/risk.py — deterministic criteria plus the calibrated model",
+        "sensitivity": round(sensitivity, 4),
+        "missed": missed,
+        "false_alarm_rate": round(false_alarm_rate, 4),
+        "n_red_flag_cases": len(positives),
+        "n_benign_cases": len(negatives),
+        "gates": GATES,
+        "red_flag_cases": positive_rows,
+        "benign_cases": negative_rows,
+    }
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(json.dumps(report, indent=2) + "\n")
+
+    breaches = []
+    if sensitivity < GATES["sensitivity"]:
+        breaches.append(f"sensitivity {sensitivity:.2f} < {GATES['sensitivity']}")
+    if false_alarm_rate > GATES["false_alarm_rate"]:
+        breaches.append(f"false-alarm rate {false_alarm_rate:.2f} > {GATES['false_alarm_rate']}")
+
+    print("=" * 78)
+    print("BELOW GATE: " + "; ".join(breaches) if breaches else "All gates met.")
+    print(f"wrote {args.out}\n")
+    return 1 if (args.gate and breaches) else 0
 
 
 if __name__ == "__main__":

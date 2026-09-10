@@ -82,9 +82,8 @@ the trigger. It is a strong control, not a guarantee, and I would rather say so.
 "The notes look good" is not a quality bar when the failure mode is a missed red flag. So there is an
 evaluation harness (`backend/eval/`, `backend/scripts/eval_red_flags.py`) that scores the decision support
 against classic can't-miss presentations and reports recall alongside a no-false-alarm precision
-metric. It is runnable in CI without needing an LLM — though wiring it into the pipeline as a gate is
-still on the list below, and the backend test step currently runs `continue-on-error: true`, so nothing
-is actually blocking today.
+metric. Both evaluations now run in CI as hard gates. They did not at the time this was written, and the
+harness had drifted badly enough to be worse than nothing — see the addendum.
 
 Recall and precision pull against each other here, and the direction matters: a missed red flag is
 worse than a spurious one, but a system that flags everything gets ignored, which is the same as
@@ -94,11 +93,14 @@ missing everything.
 
 ## The AI decisions
 
-**Which model, and what happens when it fails.** Extraction was built for Gemini with a **runtime**
-OpenAI fallback — if Gemini fails, the same job runs on OpenAI. Speech-to-text uses OpenAI, with Sarvam
-selected when the OpenAI key isn't configured; that one is a configuration-time choice, not runtime
-failover. If transcription itself fails, the endpoint returns HTTP 502. Worth being precise about,
-because only one of those two is real resilience.
+**Which model, and what happens when it fails.** Extraction runs Gemini first and falls through to
+OpenAI at runtime; speech-to-text runs OpenAI first and falls through to Sarvam. Both are ordered
+chains, both fail over on transient errors, and a non-transient failure like a bad key skips the rest
+of that vendor's models rather than retrying them.
+
+That is the state after the audit. Before it, neither was true: the LLM lane rotated between Gemini
+models only, and speech-to-text picked a provider from *which key was configured* and returned 502 on
+failure — so a doctor's speech was lost while a healthy second provider sat configured and unused.
 
 **What happens when the output is malformed.** A salvage step (`_salvage_json`) recovers truncated or
 fenced JSON. If it still cannot parse, the feature returns empty rather than crashing the request.
@@ -130,11 +132,15 @@ the doctor typed. I have not benchmarked exact latency and will not quote number
 Structured extraction started coming back empty. That reads like a prompt or model failure, and the
 tempting move was to start rewriting prompts.
 
-Instead I wrote `backend/scripts/diag_ai.py` to call each provider directly and print the raw
-response. Gemini returned **HTTP 401** on the endpoints the code uses; OpenAI returned a normal
-result. The problem was authentication, one layer below where the symptom appeared. The fix was the
-OpenAI fallback, and extraction currently runs on OpenAI. The diagnostic script stayed in the repo,
-because the next provider failure will look identical from the outside.
+Instead I called each provider directly and printed the raw response. Gemini returned **HTTP 401**
+on the endpoints the code uses; OpenAI returned a normal result. The problem was authentication, one
+layer below where the symptom appeared.
+
+That diagnosis is where this story used to end, and the ending was wrong: I described the fix as "an
+OpenAI fallback", but no such fallback existed in the code. The LLM lane rotated between *Gemini*
+models and stopped there. A later audit caught it — see the addendum. The failover is real now, and
+the shape of that mistake is worth keeping: I had described the fix I intended rather than the one I
+shipped.
 
 **Our own rate limiter blocked our own live scribe.**
 
@@ -142,9 +148,12 @@ The live flow calls `/scribe/transcribe`, `/scribe/live` (the suggestions lane) 
 many times a minute by design. The per-IP limiter on the AI endpoints treated that as abuse.
 
 Again the symptom lied: nothing errored, the note and suggestions just came back empty. Tracing a
-single consultation request by request showed the limiter rejecting our own calls. I exempted the
-three live endpoints. The real lesson was that I had set the limit against imagined client behaviour
-rather than the behaviour the app actually has.
+single consultation request by request showed the limiter rejecting our own calls. The real lesson
+was that I had set the limit against imagined client behaviour rather than the behaviour the app
+actually has.
+
+The fix I originally described here — exempting the three live endpoints — is not what the code did:
+they stayed in the *stricter* AI bucket. The audit corrected both the story and the limiter.
 
 It is also an in-memory limiter, so it counts per process — across N instances the effective limit
 becomes N times what is configured. That is unfixed and listed below.
@@ -152,6 +161,11 @@ becomes N times what is configured. That is unfixed and listed below.
 ---
 
 ## What I'd fix given another week
+
+> **Note:** this list was written before the audit. Items 1–5 and 8–12 are now done; see the
+> addendum and the README for what shipped. Items 6 and 7 — deployment, and coding the diagnoses —
+> remain open, and they are still the two that matter most.
+
 
 1. **Make the visit save transactional.** The visit, note, `clinical_facts` and audit entry are written
    as separate calls. A mid-way failure leaves a partial save. Move it into one Postgres function.
@@ -187,3 +201,49 @@ And five more I'd want fixed before this went anywhere near real patients:
 
 The external clinical synthesis API is not mine. It is also a single point of dependency, alongside
 Supabase, and I would treat both as risks in any real deployment.
+
+
+---
+
+## Addendum: the audit
+
+This case study was written against an earlier state of the repository. A later full audit —
+rebuilding the database from the committed migrations, walking the OpenAPI schema, and testing the
+claims one at a time — found that several statements above described intended behaviour rather than
+shipped behaviour. Correcting them mattered more than the code fixes, because a false claim in a
+README is a claim someone might rely on.
+
+**Claims that were not backed by the code**
+
+| Claim | Reality |
+|---|---|
+| "Runtime OpenAI fallback" for structuring | The lane rotated between Gemini models only. No cross-vendor failover existed |
+| `backend/scripts/diag_ai.py` "stayed in the repo" | The file did not exist |
+| "I exempted the three live endpoints" from rate limiting | They were in the *stricter* AI bucket |
+| Allergy and "duplicate-therapy" checks | Only a loose two-way substring allergy check, which fired on unrelated drugs |
+| "Measured clinical quality" from the red-flag harness | The harness scored a knowledge-base function that had already been removed from the request path, and needed a live database, so it could not run in CI |
+
+**Defects the audit found**
+
+* `visits.status` allowed only `('draft','approved')` while the application wrote `'in_progress'` —
+  every draft save would have failed on a database built from the committed migrations. The schema
+  only worked because the live project had drifted.
+* `soap_notes` had RLS enabled with no `UPDATE` policy. PostgREST returns 204 for an update matching
+  zero rows, so finalising a draft reported success and silently wrote nothing.
+* The audit hash chain selected its predecessor with `order by at desc, id desc`. `at` is the
+  transaction timestamp and is identical for every row in one transaction, so the tie broke on a
+  random UUID and rows chained out of insertion order — reachable in normal use, because
+  `finalize_visit()` writes its audit row inside the clinical transaction.
+* Patient search interpolated raw input into a PostgREST filter string.
+* `await file.read()` on the audio endpoint had no size ceiling.
+* The rate limiter's bucket dictionary grew without bound.
+* A JSON `null` in a model's symptom array reached the physician as the literal word "None".
+* With decision support unavailable, the consultation dead-ended: the only route to Review & Sign
+  went through selecting a primary diagnosis, and there was nothing to select.
+
+**The lesson worth keeping.** Every one of these was invisible from the outside. The application ran.
+The tests passed — there was one test. What made them visible was building the system from its own
+committed artefacts: applying the migrations to an empty database, walking the route table, running
+the evaluation against the code that actually ships. A claim is only as good as the check that
+regenerates it, which is why every number in the README now comes from a file in `eval/results/` that
+CI regenerates on every push.

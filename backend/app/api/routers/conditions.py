@@ -3,8 +3,9 @@ Reads the condition's stored ICMR record (symptoms, signs, investigations,
 follow-up, source) plus its red-flag terms."""
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..deps import CurrentUser, get_current_user
+from ...core import pgrst
 from ...core.supabase import rest, user_headers
+from ..deps import CurrentUser, get_current_user
 
 router = APIRouter()
 
@@ -25,7 +26,7 @@ async def condition_detail(
 ):
     resp = await rest(
         "GET", "kb_conditions", headers=user_headers(user.token),
-        params={"id": f"eq.{condition_id}",
+        params={"id": pgrst.eq(condition_id),
                 "select": "id,name,specialty,icd,record,provenance", "limit": "1"},
     )
     rows = resp.json() if resp.status_code == 200 else []

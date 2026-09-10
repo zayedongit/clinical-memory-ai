@@ -1,13 +1,18 @@
-"""Structured logging, optional Sentry, and request-logging middleware.
+"""Structured logging, request correlation, metrics middleware, and Sentry.
 
-We deliberately NEVER log request or response bodies — transcripts, notes, and
-patient data are PHI. Only method, path, status, timing, a per-request id, and
-redacted query params are logged. Sentry, if configured, runs with PII off.
+Request and response bodies are never logged. Transcripts, notes, entities and
+prescriptions are all PHI, and a log aggregator is not a clinical record
+system. What is logged: method, templated route, status, duration, a
+correlation id, and query parameters with anything identifying redacted.
+
+The redaction list is deliberately broad. `q` is redacted because it is a
+patient search — a log full of `q=Sharma` is a log full of patient names.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from contextvars import ContextVar
@@ -16,11 +21,21 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from .config import get_settings
+from .metrics import registry
 
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
-# Query-param keys that could carry identifiers we don't want in logs verbatim.
-_REDACT = ("phone", "name", "email", "token", "apikey", "authorization", "q")
+_REDACT = ("phone", "name", "email", "token", "apikey", "authorization", "q",
+           "uhid", "dob", "address", "pincode")
+
+# UUIDs and other ids in a path would give every patient their own metric
+# series. Collapse them so the route label stays low-cardinality.
+_UUID = re.compile(r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_NUMID = re.compile(r"/\d+")
+
+
+def route_template(path: str) -> str:
+    return _NUMID.sub("/{id}", _UUID.sub("/{id}", path)) or "/"
 
 
 class JsonFormatter(logging.Formatter):
@@ -45,13 +60,11 @@ def setup_logging() -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(s.log_level.upper())
-    # Quiet chatty client libraries — we do our own request logging.
     for noisy in ("httpx", "httpcore", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def init_sentry() -> bool:
-    """Initialise Sentry only if a DSN is set and the SDK is installed."""
     s = get_settings()
     if not s.sentry_dsn:
         return False
@@ -74,11 +87,14 @@ def _redact(params: dict) -> dict:
 
 
 class RequestLogMiddleware(BaseHTTPMiddleware):
+    """Correlation id, PHI-safe access log, and request metrics."""
+
     async def dispatch(self, request: Request, call_next):
         rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
         tok = request_id_var.set(rid)
         start = time.perf_counter()
         log = logging.getLogger("request")
+        route = route_template(request.url.path)
         status_code = 500
         try:
             response = await call_next(request)
@@ -86,11 +102,17 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
             response.headers["x-request-id"] = rid
             return response
         finally:
+            duration = time.perf_counter() - start
+            registry.inc("cma_http_requests_total", {
+                "route": route, "method": request.method,
+                "status": f"{status_code // 100}xx",
+            })
+            registry.observe("cma_http_request_seconds", duration, {"route": route})
             log.info("http", extra={"extra_fields": {
                 "method": request.method,
-                "path": request.url.path,
+                "route": route,
                 "status": status_code,
-                "dur_ms": round((time.perf_counter() - start) * 1000, 1),
+                "dur_ms": round(duration * 1000, 1),
                 "query": _redact(dict(request.query_params)),
             }})
             request_id_var.reset(tok)

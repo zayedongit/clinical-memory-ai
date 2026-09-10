@@ -1,45 +1,62 @@
-"""Clinical Synthesis API — decision-support proxy.
+"""Proxy to the external Clinical Synthesis API.
 
-We call the synthesis service's production clinical brain (ICMR/MoHFW-grounded DDx, investigations,
-treatment) from OUR backend only — the base URL is a shared secret and the upstream
-is unauthenticated, so it must never be reachable from the browser. Everything here
-is PHYSICIAN-REVIEW-ONLY decision support; the physician remains the decision maker.
+**This is not our clinical brain.** The differential diagnoses, investigations
+and treatment recommendations returned by these endpoints are produced by a
+separate, externally maintained service that this project did not build. What
+lives here is the integration: request shaping, response normalisation, failure
+containment, and the rule that the browser never talks to it directly.
+
+Why the proxy exists at all: the upstream base URL is a shared secret and the
+service is unauthenticated on a shared budget, so exposing it to the browser
+would hand anyone who opened devtools an open endpoint on someone else's bill.
 
 Endpoints:
-  POST /synthesis/decision-support  — symptoms -> DDx + must-not-miss + investigations
-                                       + empiric treatment (3 lanes fired in parallel).
-  POST /synthesis/confirm           — a chosen diagnosis -> locked investigations + treatment.
+  POST /synthesis/decision-support  symptoms -> DDx + must-not-miss +
+                                    investigations + empiric treatment
+                                    (three independent lanes, fired in parallel)
+  POST /synthesis/confirm           a chosen diagnosis -> definitive Ix + Tx + sources
 
-Fail-open: on any upstream error we return empty lists (never a 5xx mid-encounter),
-mirroring the synthesis service's own contract.
+**Fail-open, loudly.** An upstream error returns empty lists with
+``available: false`` rather than a 5xx, because a decision-support outage must
+not stop a physician documenting a consultation. The client is required to show
+an explicit "unavailable" banner: the dangerous failure mode is a doctor reading
+an empty differential as "nothing to worry about". Every failure is counted, so
+"fails open" does not quietly become "always empty".
+
+Everything returned is physician-review-only. The physician decides.
 """
+from __future__ import annotations
+
 import asyncio
+import logging
 
 import httpx
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ..deps import CurrentUser, get_current_user
 from ...core.config import get_settings
+from ...core.metrics import Timer, registry
+from ..deps import CurrentUser, get_current_user
 
+log = logging.getLogger("synthesis")
 router = APIRouter(prefix="/synthesis")
 
 
 class DecisionSupportRequest(BaseModel):
-    chief_complaints: list[str]
-    age: str | None = None
-    gender: str | None = None
-    patient_weight: str | None = None
-    duration: str | None = None
+    chief_complaints: list[str] = Field(max_length=20)
+    age: str | None = Field(default=None, max_length=16)
+    gender: str | None = Field(default=None, max_length=32)
+    patient_weight: str | None = Field(default=None, max_length=16)
+    duration: str | None = Field(default=None, max_length=64)
     vitals: dict | None = None
 
 
 class ConfirmRequest(BaseModel):
-    chief_complaints: list[str]
-    confirmed_diagnoses: list[str]
-    age: str | None = None
-    gender: str | None = None
-    patient_weight: str | None = None
+    chief_complaints: list[str] = Field(max_length=20)
+    confirmed_diagnoses: list[str] = Field(max_length=5)
+    age: str | None = Field(default=None, max_length=16)
+    gender: str | None = Field(default=None, max_length=32)
+    patient_weight: str | None = Field(default=None, max_length=16)
     vitals: dict | None = None
 
 
@@ -64,13 +81,24 @@ def _payload(body: BaseModel) -> dict:
 
 
 async def _post(client: httpx.AsyncClient, path: str, payload: dict) -> dict:
-    """One lane. Fail-open: any error -> {} so a partial encounter still works."""
+    """One lane. Fails open to {} so a partial encounter still works — but the
+    failure is logged and counted, because a silent fail-open is
+    indistinguishable from an upstream that simply has nothing to say."""
+    lane = path.rsplit("/", 1)[-1]
+    labels = {"capability": "decision_support", "provider": "synthesis", "lane": lane}
     try:
-        r = await client.post(f"{_base()}{path}", json=payload, headers=_headers())
+        with Timer("cma_ai_call_seconds", labels):
+            r = await client.post(f"{_base()}{path}", json=payload, headers=_headers())
         if r.status_code == 200:
+            registry.inc("cma_ai_calls_total", {**labels, "outcome": "ok"})
             return r.json()
-    except (httpx.HTTPError, ValueError):
-        pass
+        registry.inc("cma_ai_calls_total", {**labels, "outcome": f"http_{r.status_code}"})
+        log.warning("synthesis_lane_failed",
+                    extra={"extra_fields": {"lane": lane, "status": r.status_code}})
+    except (httpx.HTTPError, ValueError) as e:
+        registry.inc("cma_ai_calls_total", {**labels, "outcome": "transport_error"})
+        log.warning("synthesis_lane_error",
+                    extra={"extra_fields": {"lane": lane, "error": type(e).__name__}})
     return {}
 
 
@@ -81,15 +109,18 @@ async def decision_support(body: DecisionSupportRequest, user: CurrentUser = Dep
         return _empty()
 
     payload = _payload(body)
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=get_settings().synthesis_timeout_s) as client:
         ddx_r, inv_r, tx_r = await asyncio.gather(
             _post(client, "/api/rx/synthesize", payload),
             _post(client, "/api/rx/investigations", payload),
             _post(client, "/api/rx/treatment-fast", payload),
         )
 
+    available = bool(ddx_r or inv_r or tx_r)
+    registry.inc("cma_decision_support_total", {"available": str(available).lower()})
     return {
-        "available": bool(ddx_r or inv_r or tx_r),
+        "available": available,
+        "source": "external Clinical Synthesis API (not built by this project)",
         "differential_diagnosis": _ddx(ddx_r.get("differential_diagnosis")),
         "must_not_miss": [
             {"diagnosis": str(m.get("diagnosis", "")).strip()}
@@ -109,11 +140,12 @@ async def confirm(body: ConfirmRequest, user: CurrentUser = Depends(get_current_
 
     payload = _payload(body)
     payload["confirmation_locked"] = True
-    async with httpx.AsyncClient(timeout=40) as client:
+    async with httpx.AsyncClient(timeout=get_settings().synthesis_timeout_s + 10) as client:
         r = await _post(client, "/api/rx/synthesize", payload)
 
     return {
         "available": bool(r),
+        "source": "external Clinical Synthesis API (not built by this project)",
         "investigations": _investigations(r.get("suggested_investigations")),
         "treatment": _treatment(r.get("treatment_recommendations")),
         "sources": [
@@ -166,6 +198,13 @@ def _investigations(items: object) -> list[dict]:
     return out
 
 
+def _strings(value: object, limit: int | None = None) -> list[str]:
+    """`str(None)` is `"None"`, so nulls in an upstream array must be dropped
+    rather than stringified into the clinician's screen."""
+    items = [x.strip() for x in (value or []) if isinstance(x, str) and x.strip()]
+    return items[:limit] if limit else items
+
+
 def _drug(d: dict) -> dict:
     return {
         "drug": str(d.get("drug", "")).strip(),
@@ -173,7 +212,7 @@ def _drug(d: dict) -> dict:
         "route": str(d.get("route", "")).strip(),
         "frequency": str(d.get("frequency", "")).strip(),
         "duration": str(d.get("duration", "")).strip(),
-        "brands": [str(b).strip() for b in (d.get("brands") or []) if str(b).strip()][:4],
+        "brands": _strings(d.get("brands"), 4),
         "dose_needs_doctor": bool(d.get("dose_needs_doctor")),
         "dose_flag": str(d.get("dose_flag", "")).strip(),
     }
@@ -185,7 +224,7 @@ def _treatment(items: object) -> list[dict]:
         if not isinstance(t, dict):
             continue
         first = [_drug(x) for x in (t.get("first_line") or []) if isinstance(x, dict) and x.get("drug")]
-        nonpharm = [str(x).strip() for x in (t.get("non_pharmacological") or []) if str(x).strip()]
+        nonpharm = _strings(t.get("non_pharmacological"))
         if not first and not nonpharm:
             continue
         out.append({

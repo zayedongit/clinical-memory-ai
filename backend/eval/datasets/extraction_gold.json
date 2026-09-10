@@ -1,0 +1,248 @@
+{
+  "description": "SYNTHETIC consultation transcripts with gold annotations, plus a recorded (hand-authored) model response per case. No real patient data. Used by scripts/eval_extraction.py to measure the extraction post-processing pipeline deterministically: entity normalisation, citation verification, allergy-negation handling, and the completeness rubric.",
+  "data_provenance": "synthetic — written by hand for evaluation, not captured from any consultation",
+  "cases": [
+    {
+      "id": "acs-hinglish",
+      "note": "Code-mixed. Model tidies a real quote (should still verify) and invents one (must be dropped).",
+      "transcript": "Doctor: namaste, baithiye. Kya problem hai? Patient: doctor sahab, mujhe chest pain hai since, since two days, aur bahut sweating ho rahi hai. Doctor: dard kaise hai, pressure jaisa? Patient: haan, bhaari lagta hai, left arm tak jaata hai. Doctor: saans phoolti hai? Patient: haan thoda, stairs chadhte waqt. Doctor: koi purani bimari? Patient: sugar hai, metformin leta hoon subah shaam. Doctor: kisi dawai se allergy? Patient: nahi, koi allergy nahi hai. Doctor: BP dekhte hain. BP one forty over ninety hai, pulse one hundred four.",
+      "gold": {
+        "symptoms": ["chest pain", "sweating", "breathlessness"],
+        "medications": ["metformin"],
+        "allergies_none_known": true,
+        "allergens": [],
+        "vitals": {"bp": "140/90", "hr": "104"}
+      },
+      "model_response": {
+        "chief_complaints": [
+          {"text": "chest pain", "duration": "2 days", "evidence": "mujhe chest pain hai since two days"},
+          {"text": "sweating", "duration": "", "evidence": "bahut sweating ho rahi hai"},
+          {"text": "breathlessness on exertion", "duration": "", "evidence": "saans phoolti hai, stairs chadhte waqt"},
+          {"text": "palpitations", "duration": "", "evidence": "patient reports palpitations and dizziness"}
+        ],
+        "hpi": "Heavy, pressure-like chest pain for two days radiating to the left arm, with sweating and exertional breathlessness.",
+        "past_history": "Type 2 diabetes",
+        "allergies": "No known drug allergies",
+        "medications": "metformin twice daily",
+        "general_exam": "",
+        "systemic_exam": "",
+        "vitals": {"bp": "140/90", "hr": "104"},
+        "evidence": {
+          "hpi": "bhaari lagta hai, left arm tak jaata hai",
+          "past_history": "sugar hai",
+          "allergies": "koi allergy nahi hai",
+          "medications": "metformin leta hoon subah shaam",
+          "vitals": "BP one forty over ninety hai, pulse one hundred four",
+          "general_exam": "on examination the patient was pale and clammy"
+        }
+      }
+    },
+    {
+      "id": "urti-benign",
+      "note": "Benign presentation. Model invents a vital that was never measured.",
+      "transcript": "Doctor: kya hua? Patient: two days se cold and cough hai, halka bukhar bhi. Doctor: saans lene mein dikkat? Patient: nahi, bilkul nahi. Doctor: khaana kha rahe ho? Patient: haan normal. Doctor: koi dawai chal rahi hai? Patient: nahi. Doctor: allergy? Patient: nahi pata, kabhi nahi hui.",
+      "gold": {
+        "symptoms": ["cough", "cold", "fever"],
+        "medications": [],
+        "allergies_none_known": true,
+        "allergens": [],
+        "vitals": {}
+      },
+      "model_response": {
+        "chief_complaints": [
+          {"text": "cold and cough", "duration": "2 days", "evidence": "two days se cold and cough hai"},
+          {"text": "mild fever", "duration": "2 days", "evidence": "halka bukhar bhi"}
+        ],
+        "hpi": "Cold and cough for two days with mild fever. No breathlessness, eating normally.",
+        "past_history": "",
+        "allergies": "No known allergies",
+        "medications": "",
+        "general_exam": "",
+        "systemic_exam": "",
+        "vitals": {"temp": "100.2", "spo2": "98"},
+        "evidence": {
+          "hpi": "two days se cold and cough hai, halka bukhar bhi",
+          "allergies": "kabhi nahi hui",
+          "vitals": "temperature was one hundred point two"
+        }
+      }
+    },
+    {
+      "id": "penicillin-allergy",
+      "note": "A real allergen, not a negative. Must not be recorded as 'none known'.",
+      "transcript": "Doctor: gale mein dard kab se? Patient: teen din se, nigalne mein dikkat hai. Doctor: bukhar? Patient: haan, raat ko badhta hai. Doctor: koi allergy? Patient: haan, penicillin se rash aa jaata hai, aur sulfa se bhi. Doctor: aur koi dawai? Patient: sirf paracetamol le raha hoon.",
+      "gold": {
+        "symptoms": ["sore throat", "difficulty swallowing", "fever"],
+        "medications": ["paracetamol"],
+        "allergies_none_known": false,
+        "allergens": ["penicillin", "sulfa"],
+        "vitals": {}
+      },
+      "model_response": {
+        "chief_complaints": [
+          {"text": "sore throat", "duration": "3 days", "evidence": "gale mein dard"},
+          {"text": "difficulty swallowing", "duration": "3 days", "evidence": "nigalne mein dikkat hai"},
+          {"text": "fever", "duration": "", "evidence": "bukhar? Patient: haan, raat ko badhta hai"}
+        ],
+        "hpi": "Sore throat for three days with odynophagia and evening fever.",
+        "past_history": "",
+        "allergies": "penicillin, sulfa",
+        "medications": "paracetamol",
+        "general_exam": "",
+        "systemic_exam": "",
+        "vitals": {},
+        "evidence": {
+          "hpi": "teen din se, nigalne mein dikkat hai",
+          "allergies": "penicillin se rash aa jaata hai, aur sulfa se bhi",
+          "medications": "sirf paracetamol le raha hoon"
+        }
+      }
+    },
+    {
+      "id": "chronic-htn-review",
+      "note": "Follow-up with full vitals. Model returns a clean, well-evidenced extraction.",
+      "transcript": "Doctor: routine BP check ke liye aaye hain? Patient: haan doctor, teen mahine ho gaye. Doctor: koi problem? Patient: kabhi kabhi sar dard hota hai, subah. Doctor: dawai le rahe hain? Patient: amlodipine five milligram roz. Doctor: allergy? Patient: koi nahi. Doctor: BP one fifty two over ninety four, pulse seventy eight, weight eighty two kilo.",
+      "gold": {
+        "symptoms": ["headache"],
+        "medications": ["amlodipine"],
+        "allergies_none_known": true,
+        "allergens": [],
+        "vitals": {"bp": "152/94", "hr": "78", "weight": "82"}
+      },
+      "model_response": {
+        "chief_complaints": [
+          {"text": "morning headache", "duration": "", "evidence": "kabhi kabhi sar dard hota hai, subah"}
+        ],
+        "hpi": "Attending for routine blood pressure review after three months. Occasional morning headache.",
+        "past_history": "Hypertension",
+        "allergies": "None",
+        "medications": "amlodipine 5 mg daily",
+        "general_exam": "",
+        "systemic_exam": "",
+        "vitals": {"bp": "152/94", "hr": "78", "weight": "82"},
+        "evidence": {
+          "hpi": "routine BP check ke liye aaye hain",
+          "past_history": "routine BP check",
+          "allergies": "koi nahi",
+          "medications": "amlodipine five milligram roz",
+          "vitals": "BP one fifty two over ninety four, pulse seventy eight, weight eighty two kilo"
+        }
+      }
+    },
+    {
+      "id": "gastro-dehydration",
+      "note": "Model swaps a clinical noun in one citation — the dangerous near-miss.",
+      "transcript": "Doctor: kab se ho raha hai? Patient: kal raat se loose motions aur ulti. Doctor: kitni baar? Patient: das baar se zyada. Doctor: paani pee paa rahe ho? Patient: nahi, ulti ho jaati hai. Doctor: chakkar? Patient: haan, khade hone par. Doctor: koi dawai? Patient: nahi li abhi tak. Doctor: allergy koi nahi na? Patient: nahi.",
+      "gold": {
+        "symptoms": ["loose motions", "vomiting", "dizziness"],
+        "medications": [],
+        "allergies_none_known": true,
+        "allergens": [],
+        "vitals": {}
+      },
+      "model_response": {
+        "chief_complaints": [
+          {"text": "loose motions", "duration": "1 day", "evidence": "kal raat se loose motions aur ulti"},
+          {"text": "vomiting", "duration": "1 day", "evidence": "ulti ho jaati hai"},
+          {"text": "dizziness on standing", "duration": "", "evidence": "chakkar? Patient: haan, khade hone par"}
+        ],
+        "hpi": "More than ten episodes of loose motions and vomiting since last night, unable to keep fluids down, dizzy on standing.",
+        "past_history": "",
+        "allergies": "No known allergies",
+        "medications": "",
+        "general_exam": "",
+        "systemic_exam": "",
+        "vitals": {},
+        "evidence": {
+          "hpi": "das baar se zyada",
+          "allergies": "allergy koi nahi na",
+          "general_exam": "kal raat se black stools aur ulti"
+        }
+      }
+    },
+    {
+      "id": "empty-consultation",
+      "note": "Almost nothing said. The pipeline must not manufacture content.",
+      "transcript": "Doctor: haan boliye. Patient: bas thoda thak jaata hoon.",
+      "gold": {
+        "symptoms": ["fatigue"],
+        "medications": [],
+        "allergies_none_known": false,
+        "allergens": [],
+        "vitals": {}
+      },
+      "model_response": {
+        "chief_complaints": [
+          {"text": "fatigue", "duration": "", "evidence": "bas thoda thak jaata hoon"}
+        ],
+        "hpi": "",
+        "past_history": "",
+        "allergies": "",
+        "medications": "",
+        "general_exam": "",
+        "systemic_exam": "",
+        "vitals": {},
+        "evidence": {}
+      }
+    }
+  ],
+  "citation_cases": {
+    "description": "Objective ground truth for citation verification: is the quote present in the transcript or not? `supported` quotes are verbatim or lightly tidied; `fabricated` quotes are fluent inventions of the kind a model actually produces.",
+    "items": [
+      {
+        "transcript": "Patient: mujhe chest pain hai since two days, aur bahut sweating ho rahi hai. Doctor: saans phoolti hai? Patient: haan thoda.",
+        "supported": [
+          "mujhe chest pain hai since two days",
+          "bahut sweating ho rahi hai",
+          "mujhe chest pain hai since two days, aur bahut sweating",
+          "saans phoolti hai"
+        ],
+        "fabricated": [
+          "patient reports crushing chest pain radiating to the left arm",
+          "mujhe headache hai since two days",
+          "the patient denies any sweating",
+          "patient has a past history of myocardial infarction"
+        ]
+      },
+      {
+        "transcript": "Doctor: koi allergy? Patient: haan, penicillin se rash aa jaata hai. Doctor: aur koi dawai? Patient: sirf paracetamol.",
+        "supported": [
+          "penicillin se rash aa jaata hai",
+          "sirf paracetamol",
+          "haan, penicillin se rash aa jaata hai"
+        ],
+        "fabricated": [
+          "patient is allergic to sulfa drugs",
+          "no known drug allergies",
+          "patient takes ibuprofen regularly"
+        ]
+      },
+      {
+        "transcript": "Doctor: BP dekhte hain. It is one forty over ninety. Pulse is one hundred four. Temperature ninety nine point two.",
+        "supported": [
+          "one forty over ninety",
+          "Pulse is one hundred four",
+          "Temperature ninety nine point two"
+        ],
+        "fabricated": [
+          "BP is one eighty over one ten",
+          "oxygen saturation is ninety one percent",
+          "pulse is sixty four"
+        ]
+      },
+      {
+        "transcript": "Patient: kal raat se loose motions aur ulti ho rahi hai, das baar se zyada. Chakkar bhi aa rahe hain khade hone par.",
+        "supported": [
+          "kal raat se loose motions aur ulti ho rahi hai",
+          "das baar se zyada",
+          "Chakkar bhi aa rahe hain khade hone par"
+        ],
+        "fabricated": [
+          "kal raat se black stools aur ulti ho rahi hai",
+          "patient reports blood in the vomit",
+          "patient has been passing urine normally"
+        ]
+      }
+    ]
+  }
+}

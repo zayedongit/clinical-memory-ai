@@ -17,35 +17,44 @@ alter table public.audit_log      enable row level security;
 -- ---------------------------------------------------------------------
 -- clinics : caller can see only their own clinic
 -- ---------------------------------------------------------------------
+drop policy if exists clinics_select on public.clinics;
 create policy clinics_select on public.clinics
   for select using (id = public.current_clinic_id());
 
 -- ---------------------------------------------------------------------
 -- users : caller can see users within their clinic
 -- ---------------------------------------------------------------------
+drop policy if exists users_select on public.users;
 create policy users_select on public.users
   for select using (clinic_id = public.current_clinic_id());
 
 -- ---------------------------------------------------------------------
 -- patients
 -- ---------------------------------------------------------------------
+drop policy if exists patients_select on public.patients;
 create policy patients_select on public.patients
   for select using (clinic_id = public.current_clinic_id());
+drop policy if exists patients_insert on public.patients;
 create policy patients_insert on public.patients
   for insert with check (clinic_id = public.current_clinic_id());
+drop policy if exists patients_update on public.patients;
 create policy patients_update on public.patients
   for update using (clinic_id = public.current_clinic_id())
              with check (clinic_id = public.current_clinic_id());
+drop policy if exists patients_delete on public.patients;
 create policy patients_delete on public.patients
   for delete using (clinic_id = public.current_clinic_id());
 
 -- ---------------------------------------------------------------------
 -- visits
 -- ---------------------------------------------------------------------
+drop policy if exists visits_select on public.visits;
 create policy visits_select on public.visits
   for select using (clinic_id = public.current_clinic_id());
+drop policy if exists visits_insert on public.visits;
 create policy visits_insert on public.visits
   for insert with check (clinic_id = public.current_clinic_id());
+drop policy if exists visits_update on public.visits;
 create policy visits_update on public.visits
   for update using (clinic_id = public.current_clinic_id())
              with check (clinic_id = public.current_clinic_id());
@@ -54,10 +63,13 @@ create policy visits_update on public.visits
 -- clinical_facts : append-only. Allow insert + status-only updates;
 -- no delete (corrections supersede via new rows).
 -- ---------------------------------------------------------------------
+drop policy if exists clinical_facts_select on public.clinical_facts;
 create policy clinical_facts_select on public.clinical_facts
   for select using (clinic_id = public.current_clinic_id());
+drop policy if exists clinical_facts_insert on public.clinical_facts;
 create policy clinical_facts_insert on public.clinical_facts
   for insert with check (clinic_id = public.current_clinic_id());
+drop policy if exists clinical_facts_update on public.clinical_facts;
 create policy clinical_facts_update on public.clinical_facts
   for update using (clinic_id = public.current_clinic_id())
              with check (clinic_id = public.current_clinic_id());
@@ -67,5 +79,6 @@ create policy clinical_facts_update on public.clinical_facts
 -- Writes happen server-side via service_role (bypasses RLS), keeping the
 -- log tamper-resistant from ordinary user sessions.
 -- ---------------------------------------------------------------------
+drop policy if exists audit_log_select on public.audit_log;
 create policy audit_log_select on public.audit_log
   for select using (clinic_id = public.current_clinic_id());

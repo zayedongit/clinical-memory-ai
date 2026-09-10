@@ -9,8 +9,8 @@ import re
 
 from fastapi import APIRouter, Depends, Query
 
-from ..deps import CurrentUser, get_current_user
 from ...core.supabase import rest, user_headers
+from ..deps import CurrentUser, get_current_user
 
 router = APIRouter()
 
@@ -43,10 +43,15 @@ def _normalize(token: str) -> str:
     return ABBREV.get(t, token.strip())
 
 
+# One RPC round trip per finding, so an unbounded split turns a single request
+# into an unbounded number of database calls.
+MAX_FINDINGS = 8
+
+
 def split_findings(q: str) -> list[str]:
     parts = re.split(r"[,;+/&]| and | with | plus ", q, flags=re.IGNORECASE)
     out = [_normalize(p) for p in parts if len(p.strip()) >= 2]
-    return out or [q.strip()]
+    return (out or [q.strip()])[:MAX_FINDINGS]
 
 
 def _prev_rank(tier: str | None) -> int:
@@ -55,7 +60,7 @@ def _prev_rank(tier: str | None) -> int:
 
 @router.get("/match")
 async def match(
-    q: str = Query(min_length=2, description="one or more findings"),
+    q: str = Query(min_length=2, max_length=300, description="one or more findings"),
     age: int | None = Query(default=None, ge=0, le=120),
     sex: str | None = Query(default=None),
     user: CurrentUser = Depends(get_current_user),
@@ -89,13 +94,19 @@ async def match(
     out = []
     for c in conditions.values():
         applies, reasons = True, []
+        # `applies, _ = False, reasons.append(...)` read as an assignment but
+        # relied on tuple evaluation order to also mutate `reasons`. Same
+        # behaviour, written so it survives the next person reading it.
         if age is not None:
             if c["age_min"] is not None and age < c["age_min"]:
-                applies, _ = False, reasons.append("age below typical range")
+                applies = False
+                reasons.append("age below typical range")
             if c["age_max"] is not None and age > c["age_max"]:
-                applies, _ = False, reasons.append("age above typical range")
+                applies = False
+                reasons.append("age above typical range")
         if sex_l and c["sex_appl"] in ("male", "female") and c["sex_appl"] != sex_l:
-            applies, _ = False, reasons.append(f"typically {c['sex_appl']}")
+            applies = False
+            reasons.append(f"typically {c['sex_appl']}")
         out.append({
             "condition_id": c["condition_id"], "name": c["name"], "specialty": c["specialty"],
             "cant_miss": c["cant_miss"], "prevalence_tier": c["prevalence_tier"],

@@ -4,7 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabaseClient";
-import { apiGet, apiPost, apiUpload } from "../../lib/api";
+import { apiGet, apiPost, apiUpload, errorMessage } from "../../lib/api";
+import { warningLine } from "../../lib/safety";
 
 type Soap = { subjective: string; objective: string; assessment: string; plan: string };
 type Vitals = { bp: string; hr: string; temp: string; spo2: string; rr: string };
@@ -23,7 +24,8 @@ type DrugResult = { brand_name: string; generic_name: string | null; strength: s
 type Patient = { id: string; name: string };
 type Summary = {
   visit_count: number; problems: string[]; medications: string[]; allergies: string[];
-  recurring_symptoms: { term: string; count: number }[];
+  recurring_symptoms: { term: string; occurrences: number }[];
+  allergy_status?: "documented" | "documented_none" | "not_recorded";
   recent_visits: { date: string; assessment: string }[];
   since_last: { new_symptoms?: string[]; resolved_symptoms?: string[]; new_medications?: string[]; stopped_medications?: string[] };
   context_text: string;
@@ -42,13 +44,11 @@ function encodeWav(samples: Float32Array, sampleRate: number): Blob {
 
 const sevColor: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
 
-// Clean, user-safe error text — prefer the backend's friendly `detail`, never dump raw JSON.
+// Falls through to the shared translator, which also distinguishes 409 / 403 /
+// 429 rather than treating every failure as a generic message.
 async function apiError(r: Response, fallback: string): Promise<string> {
-  try {
-    const d = (await r.json())?.detail;
-    if (typeof d === "string" && d.trim() && d.length < 200) return d;
-  } catch { /* not json */ }
-  return fallback;
+  const message = await errorMessage(r);
+  return message.startsWith("Something went wrong") ? fallback : message;
 }
 
 export default function ScribePage() {
@@ -130,7 +130,7 @@ export default function ScribePage() {
     const r = await apiPost("/scribe/save", {
       patient_id: patientId, visit_id: draftVisitId ?? undefined, status: "in_progress",
       transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps,
-      prescription: rx.map(({ warning, ...x }) => x), clinical_considerations: considerations ?? undefined,
+      prescription: rx.map(stripUiFields), clinical_considerations: considerations ?? undefined,
       vitals: cleanVitals(), consent_given: consent, consent_method: consent ? "verbal" : undefined,
     });
     setBusy(null);
@@ -194,6 +194,10 @@ export default function ScribePage() {
         }
       } catch { /* ignore */ }
     })();
+    // Mount-only bootstrap: resolves the ?visit= query string and the live-mode
+    // handoff. loadDraft is stable within a mount, so listing it would re-run
+    // the bootstrap on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   async function startRecording() {
@@ -446,7 +450,7 @@ export default function ScribePage() {
           defaultPatient={patientId ? { id: patientId, name: patientName } : undefined}
           redFlagCount={considerations?.red_flags.length ?? 0}
           payload={{ transcript, dialogue, soap, entities: entities ?? undefined, follow_up_questions: followUps,
-            prescription: rx.map(({ warning, ...r }) => r), clinical_considerations: considerations ?? undefined,
+            prescription: rx.map(stripUiFields), clinical_considerations: considerations ?? undefined,
             vitals: cleanVitals(), consent_given: consent, consent_method: consent ? "verbal" : undefined,
             visit_id: draftVisitId ?? undefined, status: "completed" }} />
       )}
@@ -546,7 +550,7 @@ function HistoryPanel({ s }: { s: Summary }) {
       {s.problems.length > 0 && <Line label="Problems" items={s.problems} />}
       {s.medications.length > 0 && <Line label="Medications" items={s.medications} />}
       {s.allergies.length > 0 && <Line label="Allergies" items={s.allergies} tone="red" />}
-      {s.recurring_symptoms.length > 0 && <Line label="Recurring" items={s.recurring_symptoms.map((r) => `${r.term} ×${r.count}`)} />}
+      {s.recurring_symptoms.length > 0 && <Line label="Recurring" items={s.recurring_symptoms.map((r) => `${r.term} ×${r.occurrences}`)} />}
       {changed ? (
         <div className="mt-2 border-t border-slate-200/70 pt-2 text-xs text-slate-600">
           <p className="mb-1 font-semibold text-slate-600">Since last visit</p>
@@ -709,31 +713,40 @@ function DecisionSupportPanel({ ds, busy, hasSymptoms, onGet, onConfirm, onAddRx
   );
 }
 
+/** `warning` is a UI-only annotation; it must not be persisted with the Rx. */
+function stripUiFields(item: RxItem): Omit<RxItem, "warning"> {
+  const { warning: _uiOnly, ...persisted } = item;
+  void _uiOnly;
+  return persisted;
+}
+
 function RxSection({ items, setItems, summary }: { items: RxItem[]; setItems: (v: RxItem[]) => void; summary: Summary | null }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<DrugResult[]>([]);
 
   useEffect(() => {
-    if (q.trim().length < 2) { setResults([]); return; }
+    let cancelled = false;
     const t = setTimeout(async () => {
+      if (q.trim().length < 2) {
+        if (!cancelled) setResults([]);
+        return;
+      }
       const r = await apiGet(`/drugs?q=${encodeURIComponent(q.trim())}`);
-      if (r.ok) setResults((await r.json()).items || []);
+      if (!cancelled && r.ok) setResults((await r.json()).items || []);
     }, 300);
-    return () => clearTimeout(t);
+    return () => { cancelled = true; clearTimeout(t); };
   }, [q]);
 
-  function checkSafety(generic: string | null): string | undefined {
-    if (!generic || !summary) return undefined;
-    const g = generic.toLowerCase();
-    const a = (summary.allergies || []).find((x) => g.includes(x.toLowerCase()) || x.toLowerCase().includes(g));
-    if (a) return `Possible allergy — patient allergic to ${a}`;
-    const m = (summary.medications || []).find((x) => g.includes(x.toLowerCase()) || x.toLowerCase().includes(g));
-    if (m) return `Already noted on ${m} (duplicate?)`;
-    return undefined;
+  // Token-based, family-aware matching (lib/safety.ts). The previous two-way
+  // substring test fired on any shared fragment, and false allergy warnings
+  // teach a prescriber to click through the one that matters.
+  function checkSafety(generic: string | null, brand?: string | null): string | undefined {
+    if (!summary) return undefined;
+    return warningLine({ generic, brand }, summary.allergies || [], summary.medications || []);
   }
 
   function add(d: DrugResult) {
-    setItems([...items, { brand: d.brand_name, generic: d.generic_name, strength: d.strength, form: d.form, dose: "", frequency: "", duration: "", instructions: "", warning: checkSafety(d.generic_name) }]);
+    setItems([...items, { brand: d.brand_name, generic: d.generic_name, strength: d.strength, form: d.form, dose: "", frequency: "", duration: "", instructions: "", warning: checkSafety(d.generic_name, d.brand_name) }]);
     setQ(""); setResults([]);
   }
   const update = (i: number, patch: Partial<RxItem>) => setItems(items.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));

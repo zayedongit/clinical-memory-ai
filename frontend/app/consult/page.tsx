@@ -4,7 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabaseClient";
-import { apiGet, apiPost, apiUpload } from "../../lib/api";
+import { apiGet, apiPost, apiUpload, errorMessage } from "../../lib/api";
+import { checkPrescription } from "../../lib/safety";
 
 function encodeWav(samples: Float32Array, sampleRate: number): Blob {
   const buf = new ArrayBuffer(44 + samples.length * 2); const view = new DataView(buf);
@@ -36,6 +37,14 @@ type Consider = { translation: string; symptoms: string[]; red_flags: RedFlag[];
 type TrendPt = { date: string; value: string };
 type Memory = { visit_count: number; problems: { label: string; count: number; first_seen: string; last_seen: string }[]; allergies: string[]; current_medications: string[]; trends: Record<string, TrendPt[]>; since_last: { new_problems?: string[]; new_medications?: string[]; stopped_medications?: string[] } };
 
+type RiskPrompt = {
+  kind: string; scored: boolean; escalate: boolean; probability?: number; band?: string;
+  threshold?: number; model_flagged?: boolean; hard_criteria_met: string[];
+  reasons?: { label: string; contribution_pct: number }[];
+  model_performance?: { precision: number; recall: number; specificity: number; roc_auc: number };
+  reason?: string; disclaimer: string;
+};
+
 type Section = "vitals" | "complaints" | "history" | "general" | "systemic";
 const SECTIONS: { key: Section; label: string }[] = [
   { key: "vitals", label: "Vitals" }, { key: "complaints", label: "Chief Complaints" },
@@ -44,6 +53,25 @@ const SECTIONS: { key: Section; label: string }[] = [
 ];
 const urgTag: Record<string, string> = { immediate: "bg-red-600 text-white", urgent: "bg-amber-500 text-white", routine: "bg-slate-400 text-white" };
 const likeTag: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", medium: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
+
+// "No known drug allergies" is an answer, not an allergen. Treating the
+// sentence as one made every drug look like a conflict.
+const NO_KNOWN_ALLERGIES =
+  /\b(nkda|nka|no known (drug )?allerg|none known|nil known|no allerg|denies allerg|not allergic)/i;
+const BARE_NEGATIVE = /^(none|nil|no|nka|nkda|n\/?a|not known|unknown|nothing)[.!]?$/i;
+
+export function parseAllergies(text: string): string[] {
+  const t = (text ?? "").trim();
+  if (!t || NO_KNOWN_ALLERGIES.test(t) || BARE_NEGATIVE.test(t)) return [];
+  return parseList(t);
+}
+
+export function parseList(text: string): string[] {
+  return (text ?? "")
+    .split(/[,;/\n]+|\band\b/i)
+    .map((x) => x.trim())
+    .filter((x) => x.length > 2 && !BARE_NEGATIVE.test(x));
+}
 
 function ageFrom(dob: string | null): string { if (!dob) return "—"; const y = new Date(dob).getFullYear(); return y ? `${new Date().getFullYear() - y}y` : "—"; }
 
@@ -154,6 +182,9 @@ export default function ConsultWizard() {
   const [err, setErr] = useState<string | null>(null);
   const [scribeOpen, setScribeOpen] = useState(false);
   const [draftVisitId, setDraftVisitId] = useState<string | null>(null);
+  // The version we last read for this visit. Sent back on save so the backend
+  // can refuse a write that would clobber someone else's edit.
+  const [visitVersion, setVisitVersion] = useState<number | null>(null);
   const [draftSaved, setDraftSaved] = useState(false);
   const [evidence, setEvidence] = useState<Record<string, string>>({});
   const [dsFailed, setDsFailed] = useState<"unavailable" | "error" | null>(null);
@@ -164,6 +195,7 @@ export default function ConsultWizard() {
   const [liveMode, setLiveMode] = useState(true);           // fresh consults open in live mode (the main flow)
   const [liveConsider, setLiveConsider] = useState<Consider>({ translation: "", symptoms: [], red_flags: [], questions: [] });
   const [lastRx, setLastRx] = useState<{ date: string | null; items: StoredRx[] } | null>(null);
+  const [riskPrompt, setRiskPrompt] = useState<RiskPrompt | null>(null);
 
   function applyExtract(ex: Extracted) {
     setEnc((e) => ({
@@ -206,6 +238,37 @@ export default function ConsultWizard() {
     setEvidence((prev) => ({ ...prev, ...(ex.evidence || {}) }));
   }
 
+  // The escalation prompt is computed on the server but costs nothing: no
+  // provider call, no tokens. It is refreshed whenever the recorded encounter
+  // changes, and it keeps working when every AI provider is down.
+  const encounterKey = useMemo(
+    () => JSON.stringify([enc.complaints.map((c) => c.text), enc.hpi, enc.past_history,
+                          enc.medications, cleanVitals(), patient?.dob]),
+    // cleanVitals reads `vitals`; listing the two source objects is the honest
+    // dependency set here, and the JSON string is what the effect below keys on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [enc, vitals, patient?.dob],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      if (!patient || enc.complaints.length === 0) {
+        if (!cancelled) setRiskPrompt(null);
+        return;
+      }
+      const r = await apiPost("/scribe/risk", {
+        age: patient.dob ? new Date().getFullYear() - new Date(patient.dob).getFullYear() : null,
+        vitals: cleanVitals(),
+        complaints: enc.complaints.map((c) => ({ text: c.text, duration: c.duration })),
+        hpi: enc.hpi, past_history: enc.past_history, medications: enc.medications,
+      });
+      if (!cancelled && r.ok) setRiskPrompt(await r.json());
+    }, 600);
+    return () => { cancelled = true; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [encounterKey, patient]);
+
   // Short, history-aware context handed to the live lanes so suggestions reflect
   // the patient's own record — not just today's words.
   const patientContext = useMemo(() => {
@@ -227,6 +290,9 @@ export default function ConsultWizard() {
       else { const pid = params.get("patient"); if (pid) await attach(pid); }
       setLoading(false);
     })();
+    // This runs once on mount to resolve the ?visit= / ?patient= query string.
+    // loadDraft and attach are stable within a mount and read the URL once, so adding them would re-run the bootstrap on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   async function attach(pid: string) {
@@ -288,14 +354,16 @@ export default function ConsultWizard() {
       const urgent = ["immediate", "urgent"].includes(iv.urgency.toLowerCase()) || iv.mnm_floor;
       if (urgent && !selIx.has(i)) w.push({ kind: "missing_investigation", label: `${iv.urgency} investigation not ordered: ${iv.investigation}` });
     });
-    const allergy = enc.allergies.toLowerCase().trim();
-    if (allergy) {
-      const tokens = allergy.split(/[,;/]+|\band\b/).map((t) => t.trim()).filter((t) => t.length > 2);
-      rx.forEach((r) => {
-        const hay = `${r.drug} ${r.brand}`.toLowerCase();
-        tokens.forEach((t) => { if (hay.includes(t)) w.push({ kind: "allergy_conflict", label: `Possible allergy conflict: ${r.brand || r.drug} vs noted allergy "${t}"` }); });
+    // Allergy and duplicate-therapy checks run through lib/safety.ts, which
+    // recognises "no known drug allergies" as a negative and matches on whole
+    // ingredient tokens rather than on any shared substring.
+    const allergens = parseAllergies(enc.allergies);
+    const currentMeds = parseList(enc.medications);
+    rx.forEach((r) => {
+      checkPrescription({ generic: r.drug, brand: r.brand }, allergens, currentMeds).forEach((warning) => {
+        w.push({ kind: warning.kind, label: `${r.brand || r.drug}: ${warning.message}` });
       });
-    }
+    });
     vitalFlags().forEach((label) => w.push({ kind: "vitals", label }));
     return w;
   }
@@ -369,6 +437,8 @@ export default function ConsultWizard() {
     if (!r.ok) return;
     const v = await r.json();
     setDraftVisitId(vid);
+    setVisitVersion(v.version ?? null);
+    setVisitVersion(v.version ?? null);
     setLiveMode(false);                       // resuming saved work → manual wizard, not live
     if (v.patient_id) await attach(v.patient_id);
     const w = v.note?.wizard;
@@ -389,10 +459,19 @@ export default function ConsultWizard() {
   async function saveDraft() {
     if (!patient) { setErr("No patient attached."); return; }
     setSaving(true); setErr(null); setDraftSaved(false);
-    const r = await apiPost("/scribe/save", { patient_id: patient.id, visit_id: draftVisitId ?? undefined, status: "in_progress", ...composeNote() });
+    const r = await apiPost("/scribe/save", {
+      patient_id: patient.id,
+      visit_id: draftVisitId ?? undefined,
+      expected_version: visitVersion ?? undefined,
+      status: "in_progress",
+      ...composeNote(),
+    });
     setSaving(false);
-    if (!r.ok) { setErr("Couldn't save the draft."); return; }
-    setDraftVisitId((await r.json()).visit_id); setDraftSaved(true);
+    if (!r.ok) { setErr(await errorMessage(r)); return; }
+    const saved = await r.json();
+    setDraftVisitId(saved.visit_id);
+    setVisitVersion(saved.version ?? null);
+    setDraftSaved(true);
   }
 
   async function save() {
@@ -412,11 +491,14 @@ export default function ConsultWizard() {
       passed: warnings.length === 0,
     };
     const r = await apiPost("/scribe/save", {
-      patient_id: patient.id, visit_id: draftVisitId ?? undefined, status: "completed", attested: true,
+      patient_id: patient.id,
+      visit_id: draftVisitId ?? undefined,
+      expected_version: visitVersion ?? undefined,
+      status: "completed", attested: true,
       consent_given: true, consent_method: "verbal", sign_off, ...composeNote(),
     });
     setSaving(false); setGate(null);
-    if (!r.ok) { setErr(`Save failed (${r.status}).`); return; }
+    if (!r.ok) { setErr(await errorMessage(r)); return; }
     setSaved((await r.json()).visit_id);
   }
 
@@ -461,6 +543,8 @@ export default function ConsultWizard() {
       {err && <p className="mb-4 text-sm text-red-600">{err}</p>}
 
       {step === 1 && memory && <MemoryPanel m={memory} open={memoryOpen} onToggle={() => setMemoryOpen((o) => !o)} />}
+
+      {riskPrompt?.escalate && <RiskPanel r={riskPrompt} />}
 
       {step === 1 && liveMode && (
         <LiveConsult
@@ -567,14 +651,35 @@ export default function ConsultWizard() {
               <p className="font-semibold">Decision support is {dsFailed === "unavailable" ? "unavailable right now" : "unreachable"}.</p>
               <p className="mt-1 text-xs text-amber-700">
                 No differential, investigations, or treatment suggestions were generated. This does <strong>not</strong> mean there is nothing to consider — use your own clinical judgement, or{" "}
-                <button onClick={runDecisionSupport} className="underline">retry</button>. You can still complete and sign the note.
+                <button onClick={runDecisionSupport} className="underline">retry</button>.
               </p>
+              {/* Without this the consultation dead-ends: reaching Review & Sign
+                  went only through "select a primary diagnosis", and there is
+                  nothing to select when the differential is empty. Losing
+                  suggestions must never block signing a note. */}
+              <div className="mt-3 flex gap-2">
+                <button onClick={runDecisionSupport} className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-800">Retry</button>
+                <button onClick={() => setStep(3)} className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white">Continue to Review &amp; Sign →</button>
+              </div>
             </div>
           )}
 
           {!ds && !dsBusy && !dsFailed && <p className="glass rounded-2xl p-6 text-sm text-slate-400">Add at least one chief complaint in Step 1 to generate the differential.</p>}
 
-          {sub === "dx" && ds && (
+          {sub === "dx" && ds && ds.differential_diagnosis.length === 0 && !dsFailed && (
+            <div className="glass rounded-2xl p-5 text-sm">
+              <p className="text-slate-600">No differential was returned for these complaints.</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Absence of a suggestion is not reassurance. Record your own assessment on the next step.
+              </p>
+              <div className="mt-4 flex justify-between">
+                <button onClick={() => setStep(1)} className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600">← Consultation</button>
+                <button onClick={() => setStep(3)} className="btn-primary">Continue to Review &amp; Sign →</button>
+              </div>
+            </div>
+          )}
+
+          {sub === "dx" && ds && ds.differential_diagnosis.length > 0 && (
             <div className="glass rounded-2xl p-5">
               <SectionHead title="Differential diagnosis" note="Clinical Synthesis · ICMR-grounded" />
               {ds.must_not_miss.length > 0 && <div className="mb-3 flex flex-wrap gap-1.5">{ds.must_not_miss.map((m, i) => <span key={i} className="rounded bg-red-600 px-2 py-0.5 text-xs font-medium text-white">Don&apos;t miss: {m.diagnosis}</span>)}</div>}
@@ -707,6 +812,77 @@ export default function ConsultWizard() {
   );
 }
 
+/**
+ * The escalation prompt.
+ *
+ * Deliberately framed as "worth a second look", never as a diagnosis or a
+ * triage category. Three things are always shown together, because a bare
+ * score invites the reader to trust it more than it deserves:
+ *
+ *   1. which deterministic criteria fired — these are published cut-points and
+ *      are not learned, so they are the part that can be checked;
+ *   2. which features drove the model's score, with their weight;
+ *   3. how good the model actually is, and that it is unvalidated.
+ */
+function RiskPanel({ r }: { r: RiskPrompt }) {
+  const perf = r.model_performance;
+  return (
+    <section
+      className="mb-5 rounded-2xl border border-amber-300 bg-amber-50/80 p-4"
+      aria-label="Escalation prompt"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded bg-amber-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
+          Worth a second look
+        </span>
+        {r.scored && (
+          <span className="text-xs text-amber-900">
+            score {r.probability} (flags at {r.threshold})
+          </span>
+        )}
+        <span className="ml-auto text-[10px] uppercase tracking-wide text-amber-700">
+          physician-review-only
+        </span>
+      </div>
+
+      {r.hard_criteria_met.length > 0 && (
+        <ul className="mt-2 space-y-0.5">
+          {r.hard_criteria_met.map((c, i) => (
+            <li key={i} className="text-sm font-medium text-amber-900">· {c}</li>
+          ))}
+        </ul>
+      )}
+
+      {r.scored && (r.reasons?.length ?? 0) > 0 && (
+        <div className="mt-2">
+          <p className="text-[10px] font-bold uppercase tracking-wide text-amber-700">
+            What raised the score
+          </p>
+          <ul className="mt-1 flex flex-wrap gap-1.5">
+            {r.reasons!.map((reason, i) => (
+              <li key={i} className="rounded bg-white/70 px-2 py-0.5 text-xs text-amber-900">
+                {reason.label} <span className="text-amber-600">{reason.contribution_pct}%</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {!r.scored && r.reason && <p className="mt-2 text-xs text-amber-800">{r.reason}</p>}
+
+      <p className="mt-2 border-t border-amber-200 pt-2 text-[11px] text-amber-800">
+        {r.disclaimer}
+        {perf && (
+          <>
+            {" "}Held-out performance on synthetic data: recall {perf.recall}, precision{" "}
+            {perf.precision}, specificity {perf.specificity}.
+          </>
+        )}
+      </p>
+    </section>
+  );
+}
+
 function PatientPicker({ onPick }: { onPick: (id: string) => void }) {
   const [mode, setMode] = useState<"search" | "register">("search");
   const [q, setQ] = useState(""); const [list, setList] = useState<Patient[]>([]);
@@ -797,14 +973,29 @@ const URG_RF: Record<string, string> = { emergency: "border-red-300 bg-red-50 te
 const SEV_Q: Record<string, string> = { high: "bg-red-100 text-red-700", moderate: "bg-amber-100 text-amber-700", low: "bg-slate-100 text-slate-600" };
 
 // Bottom voice waveform — bars driven by live mic level.
+//
+// The bar heights are a deterministic function of (index, level). The original
+// added Math.random() per bar per render, which is an impure call during render:
+// React may render a component more than once for a single commit, so the two
+// renders disagreed and the bars jittered independently of the microphone. A
+// fixed per-bar phase offset gives the same lively look and actually tracks the
+// input.
+const WAVE_BARS = 28;
+const WAVE_OFFSETS = Array.from({ length: WAVE_BARS }, (_, i) => 0.55 + 0.45 * Math.sin(i * 2.399));
+
 function Waveform({ level, active }: { level: number; active: boolean }) {
-  const bars = 28;
   return (
-    <div className="flex h-10 items-center justify-center gap-[3px]">
-      {Array.from({ length: bars }).map((_, i) => {
-        const phase = Math.sin((i / bars) * Math.PI);          // taller in the middle
-        const h = active ? Math.max(3, phase * level * 38 + Math.random() * 6) : 3;
-        return <span key={i} className={`w-[3px] rounded-full ${active ? "bg-emerald-500" : "bg-slate-300"}`} style={{ height: `${h}px`, transition: "height 120ms ease" }} />;
+    <div className="flex h-10 items-center justify-center gap-[3px]" aria-hidden>
+      {WAVE_OFFSETS.map((offset, i) => {
+        const envelope = Math.sin((i / WAVE_BARS) * Math.PI);   // taller in the middle
+        const h = active ? Math.max(3, envelope * level * 38 * offset + 3) : 3;
+        return (
+          <span
+            key={i}
+            className={`w-[3px] rounded-full ${active ? "bg-emerald-500" : "bg-slate-300"}`}
+            style={{ height: `${h}px`, transition: "height 120ms ease" }}
+          />
+        );
       })}
     </div>
   );
@@ -945,6 +1136,19 @@ function LiveConsult({ patientContext, enc, vitals, bmi, consider, onExtract, on
                 <LiveField label="Current medications" value={enc.medications} />
                 <LiveField label="Examination" value={[enc.general_exam, enc.systemic_exam].filter(Boolean).join(" · ")} />
               </div>
+
+              {/* What the microphone actually heard. Speech-to-text on
+                  code-mixed speech gets drug names and doses wrong often
+                  enough that the physician needs to be able to check the
+                  source, not just the tidied note. */}
+              <details className="mt-3 border-t border-slate-100 pt-2">
+                <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                  Transcript ({transcript.trim().length} chars)
+                </summary>
+                <p className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap text-xs text-slate-500">
+                  {transcript || "Nothing captured yet."}
+                </p>
+              </details>
             </section>
 
             {/* RIGHT — live assistant */}

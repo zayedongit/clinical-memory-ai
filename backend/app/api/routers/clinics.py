@@ -4,11 +4,12 @@ This is the one endpoint a user calls *before* they belong to a clinic, so it
 depends on a valid token (not get_current_user). It is idempotent: if the user
 is already linked, it returns their existing clinic.
 """
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..deps import get_auth_uid, get_token
+from ...core import pgrst
 from ...core.supabase import audit, rest, service_headers
 from ...schemas import ClinicBootstrapRequest, ClinicBootstrapResponse
+from ..deps import get_auth_uid, get_token, invalidate_identity_cache
 
 router = APIRouter()
 
@@ -16,9 +17,11 @@ router = APIRouter()
 @router.post("/clinics/bootstrap", response_model=ClinicBootstrapResponse)
 async def bootstrap(
     body: ClinicBootstrapRequest,
-    authorization: str | None = Header(default=None),
+    # A dependency, not a plain Header parameter. FastAPI resolves dependencies
+    # before validating the endpoint's own body, so an unauthenticated caller
+    # gets 401 rather than a 422 that hands them the request schema.
+    token: str = Depends(get_token),
 ) -> ClinicBootstrapResponse:
-    token = await get_token(authorization)
     auth_uid = await get_auth_uid(token)
 
     # Already linked? return existing (idempotent).
@@ -26,7 +29,7 @@ async def bootstrap(
         "GET",
         "users",
         headers=service_headers(),
-        params={"auth_uid": f"eq.{auth_uid}", "select": "id,clinic_id", "limit": "1"},
+        params={"auth_uid": pgrst.eq(auth_uid), "select": "id,clinic_id", "limit": "1"},
     )
     rows = existing.json() if existing.status_code == 200 else []
     if rows:
@@ -60,6 +63,10 @@ async def bootstrap(
     if u.status_code not in (200, 201):
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"User create failed: {u.text}")
     user_id = u.json()[0]["id"]
+
+    # The caller's previous request (before they had a clinic) may have been
+    # cached as "not linked". Clear it so the very next request sees the link.
+    invalidate_identity_cache()
 
     await audit(
         clinic_id=clinic_id,

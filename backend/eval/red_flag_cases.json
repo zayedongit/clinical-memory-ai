@@ -1,22 +1,387 @@
 {
-  "description": "Red-flag presentations the Considerations Engine should surface via KB grounding. Each case lists presenting symptoms and the can't-miss conditions we expect the KB to point at. 'expect_any' matches (case-insensitively) against returned condition names OR red-flag feature labels; a case passes if ANY listed term is found. This measures the recall of the curated KB grounding — misses are genuine coverage gaps worth closing.",
+  "description": "SYNTHETIC red-flag presentations and benign controls for the escalation path in app/clinical/risk.py. No real patient data. Positive cases are classic presentations a safety prompt must surface; negative cases are common benign complaints it must stay quiet on. The negative set deliberately includes NEAR-MISSES for each hard criterion (abdominal pain without fever, chronic cough without weight loss, vomiting without rapid breathing), because a false-alarm rate measured only on obviously-benign cases is not evidence of anything.",
   "cases": [
-    {"name": "Cardiac chest pain", "symptoms": ["chest pain", "sweating", "breathlessness"], "expect_any": ["coronary", "angina", "myocardial", "infarction", "acs", "cardiac"]},
-    {"name": "Meningitis", "symptoms": ["severe headache", "neck stiffness", "fever"], "expect_any": ["meningitis", "meningeal"]},
-    {"name": "Subarachnoid haemorrhage", "symptoms": ["sudden severe headache", "worst headache", "vomiting"], "expect_any": ["subarachnoid", "haemorrhage", "hemorrhage", "intracranial", "stroke"]},
-    {"name": "Pulmonary embolism / DVT", "symptoms": ["breathlessness", "chest pain", "leg swelling"], "expect_any": ["embolism", "pulmonary embolism", "thrombosis", "dvt", "pe"]},
-    {"name": "Appendicitis / acute abdomen", "symptoms": ["abdominal pain", "vomiting", "fever"], "expect_any": ["appendicitis", "peritonitis", "acute abdomen", "obstruction"]},
-    {"name": "Upper GI bleed", "symptoms": ["black stools", "vomiting blood", "dizziness"], "expect_any": ["bleed", "haemorrhage", "hemorrhage", "melaena", "melena", "ulcer", "varice"]},
-    {"name": "Stroke", "symptoms": ["facial droop", "weakness one side", "slurred speech"], "expect_any": ["stroke", "cerebrovascular", "ischaemic", "ischemic", "tia"]},
-    {"name": "Ectopic pregnancy", "symptoms": ["lower abdominal pain", "vaginal bleeding", "missed period"], "expect_any": ["ectopic", "pregnancy"]},
-    {"name": "Diabetic ketoacidosis", "symptoms": ["excessive thirst", "vomiting", "rapid breathing", "abdominal pain"], "expect_any": ["ketoacidosis", "dka", "hyperglyc"]},
-    {"name": "Sepsis / severe infection", "symptoms": ["high fever", "confusion", "fast heart rate", "low blood pressure"], "expect_any": ["sepsis", "septic", "shock"]},
-    {"name": "Asthma exacerbation", "symptoms": ["breathlessness", "wheeze", "unable to speak full sentences"], "expect_any": ["asthma", "bronchospasm", "respiratory failure"]},
-    {"name": "Tuberculosis (chronic red flag)", "symptoms": ["cough", "weight loss", "night sweats", "blood in sputum"], "expect_any": ["tuberculosis", "tb", "malignancy", "carcinoma", "cancer"]}
+    {
+      "name": "Cardiac chest pain",
+      "symptoms": [
+        "chest pain",
+        "sweating",
+        "breathlessness"
+      ],
+      "expect_any": [
+        "coronary",
+        "angina",
+        "myocardial",
+        "infarction",
+        "acs",
+        "cardiac"
+      ]
+    },
+    {
+      "name": "Meningitis",
+      "symptoms": [
+        "severe headache",
+        "neck stiffness",
+        "fever"
+      ],
+      "expect_any": [
+        "meningitis",
+        "meningeal"
+      ]
+    },
+    {
+      "name": "Subarachnoid haemorrhage",
+      "symptoms": [
+        "sudden severe headache",
+        "worst headache",
+        "vomiting"
+      ],
+      "expect_any": [
+        "subarachnoid",
+        "haemorrhage",
+        "hemorrhage",
+        "intracranial",
+        "stroke"
+      ]
+    },
+    {
+      "name": "Pulmonary embolism / DVT",
+      "symptoms": [
+        "breathlessness",
+        "chest pain",
+        "leg swelling"
+      ],
+      "expect_any": [
+        "embolism",
+        "pulmonary embolism",
+        "thrombosis",
+        "dvt",
+        "pe"
+      ]
+    },
+    {
+      "name": "Appendicitis / acute abdomen",
+      "symptoms": [
+        "abdominal pain",
+        "vomiting",
+        "fever"
+      ],
+      "expect_any": [
+        "appendicitis",
+        "peritonitis",
+        "acute abdomen",
+        "obstruction"
+      ]
+    },
+    {
+      "name": "Upper GI bleed",
+      "symptoms": [
+        "black stools",
+        "vomiting blood",
+        "dizziness"
+      ],
+      "expect_any": [
+        "bleed",
+        "haemorrhage",
+        "hemorrhage",
+        "melaena",
+        "melena",
+        "ulcer",
+        "varice"
+      ]
+    },
+    {
+      "name": "Stroke",
+      "symptoms": [
+        "facial droop",
+        "weakness one side",
+        "slurred speech"
+      ],
+      "expect_any": [
+        "stroke",
+        "cerebrovascular",
+        "ischaemic",
+        "ischemic",
+        "tia"
+      ]
+    },
+    {
+      "name": "Ectopic pregnancy",
+      "symptoms": [
+        "lower abdominal pain",
+        "vaginal bleeding",
+        "missed period"
+      ],
+      "expect_any": [
+        "ectopic",
+        "pregnancy"
+      ]
+    },
+    {
+      "name": "Diabetic ketoacidosis",
+      "symptoms": [
+        "excessive thirst",
+        "vomiting",
+        "rapid breathing",
+        "abdominal pain"
+      ],
+      "expect_any": [
+        "ketoacidosis",
+        "dka",
+        "hyperglyc"
+      ]
+    },
+    {
+      "name": "Sepsis / severe infection",
+      "symptoms": [
+        "high fever",
+        "confusion",
+        "fast heart rate",
+        "low blood pressure"
+      ],
+      "expect_any": [
+        "sepsis",
+        "septic",
+        "shock"
+      ]
+    },
+    {
+      "name": "Asthma exacerbation",
+      "symptoms": [
+        "breathlessness",
+        "wheeze",
+        "unable to speak full sentences"
+      ],
+      "expect_any": [
+        "asthma",
+        "bronchospasm",
+        "respiratory failure"
+      ]
+    },
+    {
+      "name": "Tuberculosis (chronic red flag)",
+      "symptoms": [
+        "cough",
+        "weight loss",
+        "night sweats",
+        "blood in sputum"
+      ],
+      "expect_any": [
+        "tuberculosis",
+        "tb",
+        "malignancy",
+        "carcinoma",
+        "cancer"
+      ]
+    }
   ],
   "negative_cases": [
-    {"name": "Common cold", "symptoms": ["runny nose", "sneezing", "mild sore throat", "mild cough"], "forbid_any": ["myocardial", "coronary", "meningitis", "subarachnoid", "embolism", "sepsis", "ketoacidosis", "stroke", "malignancy", "carcinoma"]},
-    {"name": "Tension headache", "symptoms": ["mild headache", "stress", "tiredness"], "forbid_any": ["subarachnoid", "meningitis", "intracranial", "stroke", "haemorrhage", "hemorrhage"]},
-    {"name": "Minor ankle sprain", "symptoms": ["ankle pain", "mild swelling after twist"], "forbid_any": ["embolism", "thrombosis", "fracture", "sepsis"]}
-  ]
+    {
+      "name": "Common cold",
+      "symptoms": [
+        "runny nose",
+        "sneezing",
+        "mild sore throat",
+        "mild cough"
+      ],
+      "age": 30,
+      "vitals": {
+        "temp": "99.1",
+        "hr": "76",
+        "bp": "118/76",
+        "spo2": "98"
+      },
+      "forbid_any": [
+        "pneumonia",
+        "tuberculosis"
+      ]
+    },
+    {
+      "name": "Tension headache",
+      "symptoms": [
+        "mild headache",
+        "stress",
+        "tiredness"
+      ],
+      "age": 34,
+      "vitals": {
+        "bp": "122/80",
+        "hr": "72"
+      },
+      "forbid_any": [
+        "meningitis",
+        "haemorrhage"
+      ]
+    },
+    {
+      "name": "Minor ankle sprain",
+      "symptoms": [
+        "ankle pain",
+        "mild swelling after twist"
+      ],
+      "age": 26,
+      "vitals": {
+        "bp": "120/78",
+        "hr": "74",
+        "spo2": "99"
+      },
+      "hpi": "twisted playing football, able to weight bear",
+      "forbid_any": [
+        "fracture",
+        "thrombosis"
+      ]
+    },
+    {
+      "name": "Dyspepsia (near-miss: abdominal pain, no fever)",
+      "symptoms": [
+        "burning in the stomach",
+        "acidity"
+      ],
+      "age": 41,
+      "vitals": {
+        "bp": "124/80",
+        "hr": "78",
+        "temp": "98.4"
+      },
+      "hpi": "worse after spicy food, no vomiting blood, no black stools, no fever",
+      "forbid_any": [
+        "acute abdomen"
+      ]
+    },
+    {
+      "name": "Viral gastroenteritis (near-miss: vomiting, no rapid breathing)",
+      "symptoms": [
+        "loose motions",
+        "vomiting"
+      ],
+      "age": 29,
+      "vitals": {
+        "bp": "116/74",
+        "hr": "88",
+        "temp": "99.0",
+        "rr": "16"
+      },
+      "hpi": "watery stools since morning, mild stomach discomfort, tolerating sips",
+      "forbid_any": [
+        "ketoacidosis"
+      ]
+    },
+    {
+      "name": "Smoker's cough (near-miss: chronic cough, no weight loss)",
+      "symptoms": [
+        "chronic cough"
+      ],
+      "age": 48,
+      "vitals": {
+        "bp": "128/82",
+        "hr": "80",
+        "spo2": "97"
+      },
+      "hpi": "cough for three weeks, smokes ten a day, weight steady, no night sweats, no blood in sputum",
+      "forbid_any": [
+        "tuberculosis"
+      ]
+    },
+    {
+      "name": "Allergic rhinitis",
+      "symptoms": [
+        "sneezing",
+        "itchy eyes",
+        "runny nose"
+      ],
+      "age": 22,
+      "vitals": {
+        "bp": "118/72",
+        "hr": "70",
+        "spo2": "99"
+      },
+      "forbid_any": [
+        "asthma"
+      ]
+    },
+    {
+      "name": "Mechanical low back pain",
+      "symptoms": [
+        "low back pain"
+      ],
+      "age": 37,
+      "vitals": {
+        "bp": "126/80",
+        "hr": "74"
+      },
+      "hpi": "started after lifting, no leg weakness, no bladder symptoms, no fever, no weight loss",
+      "forbid_any": [
+        "cauda equina",
+        "malignancy"
+      ]
+    },
+    {
+      "name": "Routine diabetes review",
+      "symptoms": [
+        "diabetes follow up"
+      ],
+      "age": 58,
+      "vitals": {
+        "bp": "132/84",
+        "hr": "76",
+        "spo2": "98"
+      },
+      "past_history": "type 2 diabetes on metformin",
+      "hpi": "no new complaints, taking medicines regularly, no vomiting, no excessive thirst",
+      "forbid_any": [
+        "ketoacidosis"
+      ]
+    },
+    {
+      "name": "Mild fever, no localising signs (near-miss: fever, no abdominal pain)",
+      "symptoms": [
+        "fever"
+      ],
+      "age": 33,
+      "vitals": {
+        "temp": "100.6",
+        "hr": "92",
+        "bp": "120/78",
+        "spo2": "98",
+        "rr": "18"
+      },
+      "hpi": "two days of fever, no abdominal pain, no neck stiffness, no confusion, eating normally",
+      "forbid_any": [
+        "sepsis",
+        "meningitis"
+      ]
+    },
+    {
+      "name": "Contact dermatitis",
+      "symptoms": [
+        "itchy rash on the arms"
+      ],
+      "age": 31,
+      "vitals": {
+        "bp": "118/76",
+        "hr": "72"
+      },
+      "hpi": "no fever, no blistering, started after a new detergent",
+      "forbid_any": [
+        "cellulitis"
+      ]
+    },
+    {
+      "name": "Uncomplicated UTI",
+      "symptoms": [
+        "burning while passing urine"
+      ],
+      "age": 27,
+      "vitals": {
+        "temp": "99.8",
+        "hr": "84",
+        "bp": "116/74"
+      },
+      "hpi": "increased frequency, no flank pain, no fever spikes, no vomiting",
+      "forbid_any": [
+        "pyelonephritis"
+      ]
+    }
+  ],
+  "data_provenance": "synthetic — written by hand for evaluation"
 }

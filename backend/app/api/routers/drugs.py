@@ -7,8 +7,9 @@ formulary returns nothing.
 """
 from fastapi import APIRouter, Depends, Query
 
-from ..deps import CurrentUser, get_current_user
+from ...core import pgrst
 from ...core.supabase import rest, user_headers
+from ..deps import CurrentUser, get_current_user
 
 router = APIRouter()
 
@@ -38,9 +39,14 @@ def _from_kb_drugs(rows: list[dict]) -> list[dict]:
 
 
 @router.get("/drugs")
-async def search_drugs(q: str = Query(min_length=2), user: CurrentUser = Depends(get_current_user)):
+async def search_drugs(
+    q: str = Query(min_length=2, max_length=120),
+    user: CurrentUser = Depends(get_current_user),
+):
     h = user_headers(user.token)
-    like = f"(brand_name.ilike.*{q}*,generic_name.ilike.*{q}*)"
+    # Quoted and wildcard-escaped: the formulary is 100k rows, so an unescaped
+    # `%` here turns an autocomplete keystroke into a full-table scan.
+    like = pgrst.or_ilike(q.strip(), "brand_name", "generic_name")
 
     # 1) Hospital formulary — drugs only (Pharma), brand match ranked first.
     resp = await rest("GET", "kb_formulary", headers=h, params={
