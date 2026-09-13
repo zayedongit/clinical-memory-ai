@@ -23,8 +23,11 @@ record without that signature.
 > device, not clinically validated. Reviewed with a qualified physician.
 
 **Read next:** [project guide](docs/CLINICAL_MEMORY_AI_PROJECT_GUIDE.md) ·
-[model card](docs/MODEL_CARD.md) · [intended use](docs/INTENDED_USE.md) ·
-[case study](docs/CASE_STUDY.md)
+[interview prep](docs/INTERVIEW_PREP.md) · [model card](docs/MODEL_CARD.md) ·
+[intended use](docs/INTENDED_USE.md) · [case study](docs/CASE_STUDY.md)
+
+Print-ready PDFs of the first three are in [`docs/pdf/`](docs/pdf/), regenerated
+with `make docs-pdf`.
 
 ---
 

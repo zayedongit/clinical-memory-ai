@@ -2,6 +2,10 @@
 
 *A study guide for understanding and defending this project.*
 
+> Looking for the condensed version to revise from? `INTERVIEW_PREP.md` (13
+> pages) has the pitches, the numbers, the five stories and the twenty-five
+> most likely questions. This document is the full reference behind it.
+
 This document explains what the system does, how every part works, what is
 genuinely built here versus borrowed, and how to talk about all of it. Each
 section starts in plain language and then goes technical.

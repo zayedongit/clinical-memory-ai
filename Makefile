@@ -103,6 +103,10 @@ db-push:                  ## Apply migrations to the linked Supabase project
 demo-data:                ## Load synthetic demo patients into a local database
 	cd $(BACKEND) && uv run python scripts/seed_demo.py
 
+.PHONY: docs-pdf
+docs-pdf:                 ## Render the docs to PDF (needs pandoc + Chrome)
+	./scripts/build_docs_pdf.sh
+
 .PHONY: clean
 clean:                    ## Remove build and cache artefacts
 	rm -rf $(FRONTEND)/.next $(FRONTEND)/node_modules/.cache

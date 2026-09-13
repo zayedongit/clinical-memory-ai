@@ -1,0 +1,188 @@
+/* Print stylesheet for the documentation PDFs.
+ *
+ * Rendered by Chrome headless, so this is what controls pagination, page
+ * numbers and typography. Kept deliberately plain: these are documents to read
+ * and print, not brochures. */
+
+@page {
+  size: A4;
+  /* The generous bottom margin is deliberate: scripts/stamp_page_numbers.py
+     merges a footer into that gap afterwards, because Chrome's CLI cannot
+     produce a custom one. Changing it here without changing the stamper's
+     geometry makes the footer collide with body text. */
+  margin: 20mm 18mm 26mm 18mm;
+}
+
+/* Chrome's headless PDF printer draws its own header/footer only when asked;
+ * we ask for a footer with the page number at render time. */
+
+html {
+  font-size: 10.5pt;
+}
+
+body {
+  font-family: "Charter", "Georgia", "Times New Roman", serif;
+  line-height: 1.5;
+  color: #1a1a1a;
+  max-width: none;
+  margin: 0;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+/* ---------------------------------------------------------------- title */
+header#title-block-header {
+  text-align: center;
+  margin-bottom: 2.5em;
+  padding-bottom: 1.5em;
+  border-bottom: 2px solid #1a1a1a;
+}
+
+h1.title {
+  font-size: 2.1em;
+  margin: 0 0 0.15em;
+  letter-spacing: -0.01em;
+}
+
+p.subtitle {
+  font-size: 1.25em;
+  color: #444;
+  margin: 0 0 0.4em;
+  font-style: italic;
+}
+
+p.date {
+  font-size: 0.9em;
+  color: #666;
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- headings */
+h1, h2, h3, h4 {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  line-height: 1.25;
+  color: #111;
+  break-after: avoid;
+  page-break-after: avoid;
+}
+
+h1 {
+  font-size: 1.55em;
+  margin: 1.6em 0 0.6em;
+  padding-bottom: 0.22em;
+  border-bottom: 1.5px solid #333;
+}
+
+/* A top-level heading starts a page, except the first one. */
+h1 { break-before: page; page-break-before: always; }
+header#title-block-header + h1,
+h1:first-of-type { break-before: avoid; page-break-before: avoid; }
+
+h2 {
+  font-size: 1.2em;
+  margin: 1.4em 0 0.45em;
+  color: #1a3a5c;
+}
+
+h3 {
+  font-size: 1.02em;
+  margin: 1.1em 0 0.35em;
+  color: #333;
+}
+
+/* ---------------------------------------------------------------- text */
+p { margin: 0 0 0.7em; orphans: 3; widows: 3; }
+
+strong { color: #000; }
+
+blockquote {
+  margin: 0.9em 0;
+  padding: 0.55em 1em;
+  border-left: 3px solid #6a9fd4;
+  background: #f4f8fc;
+  color: #1a1a1a;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+blockquote p:last-child { margin-bottom: 0; }
+
+/* ---------------------------------------------------------------- lists */
+ul, ol { margin: 0 0 0.7em; padding-left: 1.4em; }
+li { margin-bottom: 0.22em; }
+li > ul, li > ol { margin-top: 0.22em; }
+
+/* ---------------------------------------------------------------- code */
+code {
+  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 0.86em;
+  background: #f0f0f2;
+  padding: 0.1em 0.3em;
+  border-radius: 2px;
+}
+
+pre {
+  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 0.78em;
+  line-height: 1.35;
+  background: #f7f7f9;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  padding: 0.7em 0.9em;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  break-inside: avoid;
+  page-break-inside: avoid;
+  margin: 0.8em 0;
+}
+
+pre code { background: none; padding: 0; font-size: 1em; }
+
+/* ---------------------------------------------------------------- tables */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.9em 0;
+  font-size: 0.88em;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* A long table may break, but never mid-row, and the header repeats. */
+table.long { break-inside: auto; page-break-inside: auto; }
+thead { display: table-header-group; }
+tr { break-inside: avoid; page-break-inside: avoid; }
+
+th {
+  background: #eef2f6;
+  text-align: left;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 0.95em;
+  padding: 0.4em 0.6em;
+  border: 1px solid #c9d3dd;
+}
+
+td {
+  padding: 0.4em 0.6em;
+  border: 1px solid #dfe4ea;
+  vertical-align: top;
+}
+
+tbody tr:nth-child(even) { background: #fafbfc; }
+
+/* ---------------------------------------------------------------- rules */
+hr {
+  border: none;
+  border-top: 1px solid #ccc;
+  margin: 1.6em 0;
+}
+
+a { color: #1a4d80; text-decoration: none; }
+
+/* Table of contents, when pandoc generates one. */
+nav#TOC { break-after: page; page-break-after: always; }
+nav#TOC ul { list-style: none; padding-left: 1em; }
+nav#TOC > ul { padding-left: 0; }
+nav#TOC li { margin-bottom: 0.15em; }
+nav#TOC a { color: #1a1a1a; }

@@ -22,6 +22,7 @@ dev = [
     "psycopg[binary]>=3.2",
     "respx>=0.22.0",
     "ruff>=0.15.20",
+    "pypdf>=5.0",
 ]
 # Offline only: data ingestion, model training, evaluation harnesses.
 # Never imported by the served application — app/ml/risk_model.py does
